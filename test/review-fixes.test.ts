@@ -92,6 +92,11 @@ describe('triggers', () => {
     expect(crons.map(t => cronOf(t as unknown as Step))).toEqual(['0,5,10 * * * *', '0 9 * * *', '15,45 * * * *'])
     expect(report.triggers.map(t => t.status)).toEqual(['needs_work', 'needs_work', 'mapped'])
   })
+  test('*/n with n of 5 or more is thinned, never sped up to */5', () => {
+    const { draft, report } = wf({ triggers: [{ type: 'timer', props: { cron: '*/7 * * * *' } }, { type: 'timer', props: { cron: '* * * * *' } }] })
+    expect(draft.definition.triggers.filter(t => t.type === 'cron').map(t => cronOf(t as unknown as Step))).toEqual(['0,7,14,21,28,35,42,49 * * * *', '*/5 * * * *'])
+    expect(report.triggers.map(t => t.status)).toEqual(['needs_work', 'needs_work'])
+  })
   test('a disabled trigger is reported and not added; unread trigger settings are reported', () => {
     const { draft, report } = wf({ triggers: [{ type: 'timer', disabled: true, props: { cron: '0 9 * * *' } }, { type: 'http', props: { method: 'POST', auth: '<redacted>' } }] })
     expect(draft.definition.triggers.some(t => t.type === 'cron')).toBe(false)

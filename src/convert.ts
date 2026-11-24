@@ -406,7 +406,8 @@ function convertTriggers(triggers: PdTrigger[], keys: Keys): { triggers: Trigger
             notes.push(`Could not read the minute field "${minute}". Elaichi needs runs at least 5 minutes apart: check it.`)
             status = 'needs_work'
           } else if (minGap(minutes, wraps) < 5) {
-            fields[0] = /^\*(\/\d+)?$/.test(minute) ? '*/5' : thin(minutes, wraps).join(',')
+            const every = /^\*(?:\/(\d+))?$/.exec(minute)
+            fields[0] = every && Number(every[1] ?? 1) < 5 ? '*/5' : thin(minutes, wraps).join(',')
             notes.push(`Ran more often than every 5 minutes ("${cron}"); Elaichi's limit is every 5 minutes, so it is now "${fields.join(' ')}".`)
             status = 'needs_work'
             cron = fields.join(' ')
