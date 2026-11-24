@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readdirSync, readFileSync, statSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync, mkdirSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { checkDefinition, findTodos } from './check.ts'
 import { loadInput } from './parse.ts'
@@ -32,6 +32,7 @@ Options:
                            Needs ELAICHI_API_TOKEN. Drafts are never published or turned on.
   --api-url <url>          Elaichi API base URL (default: https://api.elaichi.ai)
   --json                   check / validate: print the result as JSON
+  --force                  Overwrite drafts already in --out (this throws away any edits made to them)
   -h, --help               Show this help
 
 Writes one <workflow>.elaichi.json per workflow ({ name, description, definition }, the body of
@@ -41,6 +42,7 @@ the original code and the Elaichi limit it hits, for an AI coding agent to work 
 export interface CliArgs {
   command?: 'check' | 'validate' | 'push'
   json: boolean
+  force: boolean
   input?: string
   out: string
   toolboxes: Record<string, string>
@@ -50,7 +52,7 @@ export interface CliArgs {
 }
 
 export function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { out: 'elaichi-drafts', toolboxes: {}, push: false, help: false, json: false }
+  const args: CliArgs = { out: 'elaichi-drafts', toolboxes: {}, push: false, help: false, json: false, force: false }
   if (argv[0] === 'check' || argv[0] === 'validate' || argv[0] === 'push') {
     args.command = argv[0]
     argv = argv.slice(1)
@@ -66,6 +68,7 @@ export function parseArgs(argv: string[]): CliArgs {
     else if (a === '--out') args.out = next()
     else if (a === '--push') args.push = true
     else if (a === '--json') args.json = true
+    else if (a === '--force') args.force = true
     else if (a === '--api-url') args.apiUrl = next()
     else if (a === '--toolbox') {
       const v = next()
@@ -112,6 +115,11 @@ export async function main(argv: string[], env: Record<string, string | undefine
     return 1
   }
 
+  const existing = drafts.map(d => d.file).filter(f => existsSync(join(args.out, f)))
+  if (existing.length > 0 && !args.force) {
+    log(`Error: ${args.out} already has ${existing.length} draft${existing.length === 1 ? '' : 's'} (${existing.slice(0, 3).join(', ')}${existing.length > 3 ? ', …' : ''}). Converting again would overwrite any edits made to them. Use a new --out folder, or add --force to replace them.`)
+    return 1
+  }
   mkdirSync(args.out, { recursive: true })
   for (const d of drafts) writeFileSync(join(args.out, d.file), `${JSON.stringify(d.body, null, 2)}\n`)
   writeFileSync(join(args.out, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)

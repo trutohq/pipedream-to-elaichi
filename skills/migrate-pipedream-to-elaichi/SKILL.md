@@ -50,7 +50,7 @@ Edit the draft JSON file. Find the step by its key in `elaichi_keys`. When a ste
 
 | `todo` kind | What to do |
 |---|---|
-| `set_toolbox` | The step names `tbx_REPLACE_<connector>`. Find or create a stored toolbox that holds the tool, then put its `tbx_…` id in `toolbox_id` and in the top-level `toolboxes` list (remove the placeholder). With MCP: `toolbox.list`, else ask before `toolbox.create` / `toolbox.set_entries`. Without MCP: ask the person for the id, or re-run the CLI with `--toolbox <connector>=tbx_…`. |
+| `set_toolbox` | The step names `tbx_REPLACE_<connector>`. Find or create a stored toolbox that holds the tool, then put its `tbx_…` id in `toolbox_id` and in the top-level `toolboxes` list (remove the placeholder). With MCP: `toolbox.list`, else ask before `toolbox.create` / `toolbox.set_entries`. Without MCP: ask the person for the id. (Re-running the CLI with `--toolbox <connector>=tbx_…` also works, but only before you edit the drafts: it needs `--force` and replaces them.) |
 | `write_tool_args` | Read the tool's input schema (MCP: `connector.list_tools` or `connection.list_tools`; the tool name is in the step's `tool`). Write `args` as a **JSONata string** that builds the arguments object, using the Pipedream props quoted in the notes. Plain text inside JSONata is a quoted string. |
 | `port_code` | Rewrite the code (kept in a comment in the step's `source`) as JavaScript, by the rules in [references/porting.md](references/porting.md). Delete the `throw` line. Set the step's `input` to pass what the code reads. |
 | `fix_code` | The Node.js code runs in a wrapper but uses something Elaichi code cannot do. The notes say what. Fix that part only. Porting rules are in [references/porting.md](references/porting.md). |

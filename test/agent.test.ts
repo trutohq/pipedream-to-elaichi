@@ -180,3 +180,19 @@ describe('agent files', () => {
     expect(readFileSync(join(ROOT, 'CLAUDE.md'), 'utf8').trim()).toBe('@AGENTS.md')
   })
 })
+
+describe('converting again', () => {
+  test('refuses to overwrite drafts in --out unless --force', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p2e-force-'))
+    const input = join(FIX, 'polyglot.json')
+    expect(await main([input, '--out', dir], {}, () => {})).toBe(0)
+    const file = join(dir, readdirSync(dir).find(f => f.endsWith('.elaichi.json')) ?? '')
+    writeFileSync(file, '{"edited": true}')
+    const { lines, log } = capture()
+    expect(await main([input, '--out', dir], {}, log)).toBe(1)
+    expect(lines.join('\n')).toContain('--force')
+    expect(readFileSync(file, 'utf8')).toBe('{"edited": true}')
+    expect(await main([input, '--out', dir, '--force'], {}, () => {})).toBe(0)
+    expect(readFileSync(file, 'utf8')).not.toBe('{"edited": true}')
+  })
+})

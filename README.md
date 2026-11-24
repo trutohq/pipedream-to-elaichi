@@ -71,10 +71,10 @@ ELAICHI_API_TOKEN=elch_... npx -y github:trutohq/pipedream-to-elaichi validate .
 
 ### Point steps at your toolboxes
 
-An Elaichi `call_tool` step names a stored toolbox (`tbx_…`). The importer cannot know yours, so it writes `tbx_REPLACE_<connector>` placeholders. Create a toolbox in Elaichi with the tools the report names, then run the importer again with that toolbox:
+An Elaichi `call_tool` step names a stored toolbox (`tbx_…`). The importer cannot know yours, so it writes `tbx_REPLACE_<connector>` placeholders. Create a toolbox in Elaichi with the tools the report names, then run the importer again with that toolbox. The CLI will not overwrite drafts already in the output folder unless you add `--force`, because that throws away edits:
 
 ```bash
-npx -y github:trutohq/pipedream-to-elaichi export.zip --toolbox slack=tbx_123 --toolbox notion=tbx_456
+npx -y github:trutohq/pipedream-to-elaichi export.zip --toolbox slack=tbx_123 --toolbox notion=tbx_456 --force
 ```
 
 ### Create the drafts in Elaichi (optional)
