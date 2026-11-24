@@ -38,7 +38,13 @@ const STEP_KEY = /^[a-z][a-z0-9_]{0,63}$/
 const STATE_KEY = /^[a-z][a-z0-9_.:-]{0,127}$/
 const EXPRESSION_FIELDS = ['run_if', 'args', 'input', 'assert', 'message', 'condition', 'value', 'title', 'until', 'when']
 
-export function checkDefinition(def: Definition): string[] {
+/**
+ * `strict` (what the importer writes): every step type must be one this file knows.
+ * Not strict (a draft someone edited): other step and trigger types are passed over, so only
+ * Elaichi's validator checks them.
+ */
+export function checkDefinition(def: Definition, opts: { strict?: boolean } = {}): string[] {
+  const strict = opts.strict ?? true
   const issues: string[] = []
   const keys = new Set<string>()
   let total = 0
@@ -46,6 +52,9 @@ export function checkDefinition(def: Definition): string[] {
   let approveSteps = 0
 
   const topAllowed = ['schema_version', 'triggers', 'toolboxes', 'steps', 'collections', 'knowledge_bases', 'input_schema', 'output', 'session_key', 'session_title', 'config_schema']
+  if (!def || typeof def !== 'object') return ['definition: must be an object']
+  if (!Array.isArray(def.triggers)) return ['definition: triggers must be a list']
+  if (!Array.isArray(def.steps)) return ['definition: steps must be a list']
   for (const f of Object.keys(def)) if (!topAllowed.includes(f)) issues.push(`definition: unknown field "${f}"`)
   if (def.schema_version !== 1) issues.push('definition: schema_version must be 1')
   if (!Array.isArray(def.toolboxes)) issues.push('definition: toolboxes is required')
@@ -55,7 +64,7 @@ export function checkDefinition(def: Definition): string[] {
   const tkeys = new Set<string>()
   def.triggers.forEach((t: Trigger, i) => {
     const allowed = TRIGGER_FIELDS[t.type]
-    if (!allowed) return issues.push(`trigger ${i}: type "${t.type}" is not one this importer writes`)
+    if (!allowed) return strict ? issues.push(`trigger ${i}: type "${t.type}" is not one this importer writes`) : undefined
     for (const f of Object.keys(t)) if (!allowed.includes(f)) issues.push(`trigger ${t.key}: unknown field "${f}"`)
     if (!t.key || t.key.length > 64) issues.push(`trigger ${i}: key must be 1 to 64 characters`)
     if (tkeys.has(t.key)) issues.push(`trigger ${t.key}: duplicate key`)
@@ -70,7 +79,9 @@ export function checkDefinition(def: Definition): string[] {
       total++
       const allowed = STEP_FIELDS[s.type]
       if (!allowed) {
-        issues.push(`step ${s.key}: type "${s.type}" is not one this importer writes`)
+        if (strict) issues.push(`step ${s.key}: type "${s.type}" is not one this importer writes`)
+        else if (keys.has(s.key)) issues.push(`step ${s.key}: duplicate key`)
+        keys.add(s.key)
         continue
       }
       for (const f of Object.keys(s)) if (!allowed.includes(f)) issues.push(`step ${s.key}: unknown field "${f}" for ${s.type}`)
@@ -90,7 +101,7 @@ export function checkDefinition(def: Definition): string[] {
         if (s.language !== 'javascript') issues.push(`step ${s.key}: language must be javascript`)
         if (typeof s.source !== 'string' || Buffer.byteLength(s.source) > 65536) issues.push(`step ${s.key}: source must be text of at most 64 KB`)
       }
-      if (s.type === 'wait' && (typeof s.seconds !== 'number' || !Number.isInteger(s.seconds) || s.seconds < 1 || s.seconds > 3600)) issues.push(`step ${s.key}: wait seconds must be a whole number from 1 to 3600`)
+      if (s.type === 'wait' && s.until === undefined && (typeof s.seconds !== 'number' || !Number.isInteger(s.seconds) || s.seconds < 1 || s.seconds > 3600)) issues.push(`step ${s.key}: wait seconds must be a whole number from 1 to 3600`)
       if (s.type === 'state.get' && (!Array.isArray(s.keys) || s.keys.some(k => typeof k !== 'string' || !STATE_KEY.test(k)))) issues.push(`step ${s.key}: state keys must match ${STATE_KEY}`)
       if (s.type === 'state.set' && (typeof s.state_key !== 'string' || !STATE_KEY.test(s.state_key))) issues.push(`step ${s.key}: state_key must match ${STATE_KEY}`)
       if (s.type === 'approve') {
@@ -105,6 +116,7 @@ export function checkDefinition(def: Definition): string[] {
           if (!STEP_KEY.test(a.key)) issues.push(`step ${s.key}: arm key ${a.key} must match ${STEP_KEY}`)
           walk(a.steps, `step ${s.key} arm ${a.key}`)
         }
+        if (Array.isArray(s.else)) walk(s.else as Step[], `step ${s.key} else`)
       }
     }
   }
@@ -113,4 +125,39 @@ export function checkDefinition(def: Definition): string[] {
   if (codeSteps > 10) issues.push(`definition: ${codeSteps} code steps; at most 10`)
   if (approveSteps > 5) issues.push(`definition: ${approveSteps} approve steps; at most 5`)
   return issues
+}
+
+/** The import TODOs still open in a draft. The review gate (`import_review`) is reported on its own. */
+export function findTodos(def: Definition): { todos: string[]; reviewGate: boolean } {
+  const todos: string[] = []
+  let reviewGate = false
+  for (const id of def.toolboxes ?? []) if (id.startsWith('tbx_REPLACE_')) todos.push(`toolboxes: ${id} is a placeholder; put a real tbx_ id in its place`)
+  const walk = (steps: Step[]) => {
+    for (const s of steps ?? []) {
+      // One line per step: the most specific reason it is still open.
+      const open =
+        s.key === 'import_review'
+          ? undefined
+          : s.type === 'check' && s.assert === 'false'
+            ? `TODO step "${s.name ?? ''}" still holds a Pipedream step's place`
+            : s.type === 'code' && typeof s.source === 'string' && /throw new Error\("TODO: port/.test(s.source)
+              ? 'code not ported yet'
+              : s.type === 'call_tool' && typeof s.toolbox_id === 'string' && s.toolbox_id.startsWith('tbx_REPLACE_')
+                ? 'toolbox_id is a placeholder'
+                : typeof s.name === 'string' && s.name.startsWith('TODO:')
+                  ? `name still starts with TODO ("${s.name}")`
+                  : typeof s.description === 'string' && s.description.startsWith('TODO:')
+                    ? `still marked TODO: ${s.description.slice(6, 160)}${s.description.length > 160 ? '…' : ''} (rewrite the description once it is fixed)`
+                    : undefined
+      if (s.key === 'import_review') reviewGate = true
+      if (open) todos.push(`step ${s.key}: ${open}`)
+      if (Array.isArray(s.branches)) for (const a of s.branches as { key: string; when: string; steps: Step[] }[]) {
+        if (a.when === 'false') todos.push(`step ${s.key}: arm ${a.key} is switched off (when "false")`)
+        walk(a.steps)
+      }
+      if (Array.isArray(s.else)) walk(s.else as Step[])
+    }
+  }
+  walk(def.steps)
+  return { todos, reviewGate }
 }

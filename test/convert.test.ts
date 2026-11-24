@@ -349,7 +349,7 @@ describe('project export', () => {
     const out = mkdtempSync(join(tmpdir(), 'pd2e-out-'))
     const logs: string[] = []
     expect(await main([zipPath(), '--out', out, '--toolbox', 'slack=tbx_abc'], {}, l => logs.push(l))).toBe(0)
-    expect(readdirSync(out).sort()).toEqual(['daily-standup-reminder-p-one.elaichi.json', 'lead-webhook-p-two.elaichi.json', 'report.json', 'report.md'])
+    expect(readdirSync(out).sort()).toEqual(['daily-standup-reminder-p-one.elaichi.json', 'lead-webhook-p-two.elaichi.json', 'migration-plan.json', 'report.json', 'report.md'])
     const body = JSON.parse(readFileSync(join(out, 'daily-standup-reminder-p-one.elaichi.json'), 'utf8'))
     expect(Object.keys(body)).toEqual(['name', 'description', 'definition'])
     expect(body.definition.toolboxes).toEqual(['tbx_abc'])

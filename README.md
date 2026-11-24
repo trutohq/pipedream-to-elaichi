@@ -2,19 +2,52 @@
 
 Turn Pipedream workflow exports into [Elaichi](https://elaichi.ai) workflow drafts, with a report of what still needs work.
 
+**Paste this into Claude Code, Codex, Cursor or any coding agent:**
+
+```text
+Migrate my Pipedream export at ~/Downloads/project_export-<id>.zip to Elaichi. Follow https://github.com/trutohq/pipedream-to-elaichi/blob/main/skills/migrate-pipedream-to-elaichi/SKILL.md
+```
+
 Pipedream Workflows shuts down on 31 March 2027, and Pipedream deletes all Workflows data by 30 April 2027. Pipedream lets you [export each project](https://pipedream.com/docs/workflows/export-workflows) as a ZIP file with one JSON file per workflow. This tool reads that export. It writes one Elaichi draft per workflow and one migration report.
 
 It never publishes a workflow and never turns one on. Every step it cannot convert stays in the draft as a TODO step, so nothing is dropped without a record.
 
-## Use it
+## Let your coding agent do it
 
-You need [Bun](https://bun.sh) 1.3 or later.
+The fastest way is to give your AI coding agent this repo's skill and ask it to do the migration. The CLI does the safe, mechanical part. The agent does the rest: it writes tool arguments, ports Python, Go and Bash code to JavaScript, rebuilds HTTP calls as tool calls, and checks every draft with Elaichi's validator. It asks you before it creates anything, and it never publishes.
+
+Add the skill:
 
 ```bash
-git clone https://github.com/trutohq/pipedream-to-elaichi.git
-cd pipedream-to-elaichi
-bun src/cli.ts ~/Downloads/project_export-proj_abc123.zip --out ./elaichi-drafts
+npx skills add trutohq/pipedream-to-elaichi
 ```
+
+That works for Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI and [other agents](https://github.com/vercel-labs/skills). In Claude Code you can also add it as a plugin:
+
+```text
+/plugin marketplace add trutohq/pipedream-to-elaichi
+/plugin install pipedream-to-elaichi@pipedream-to-elaichi
+```
+
+Or clone this repo and open your agent in it: `AGENTS.md` (and `CLAUDE.md`) point it at the same playbook.
+
+Then ask:
+
+> Migrate my Pipedream export ~/Downloads/project_export-proj_abc123.zip to Elaichi.
+
+For the best result, connect your agent to the [Elaichi MCP server](https://elaichi.ai) too. The agent can then look up each tool's arguments, create toolboxes, validate drafts and test-run them. Without it, the agent uses an Elaichi API token (`ELAICHI_API_TOKEN`) with the `validate` and `push` commands below.
+
+The playbook the agent follows is [skills/migrate-pipedream-to-elaichi/SKILL.md](skills/migrate-pipedream-to-elaichi/SKILL.md). Its work list is `migration-plan.json`, which the CLI writes next to the drafts: every open item with its reason, the original Pipedream code, the Elaichi limit it hits and what to do instead, and a `kinds` list (`set_toolbox`, `write_tool_args`, `port_code`, `rebuild_with_tools`, and so on). The CLI stays deterministic; all AI work happens in your own agent, under your eyes.
+
+## Use it yourself
+
+You need [Bun](https://bun.sh) 1.3 or later. No clone is needed:
+
+```bash
+npx -y github:trutohq/pipedream-to-elaichi ~/Downloads/project_export-proj_abc123.zip --out ./elaichi-drafts
+```
+
+From a clone, `bun src/cli.ts …` does the same.
 
 The input can be the export `.zip`, the unzipped folder, or one workflow `.json` file.
 
@@ -23,22 +56,34 @@ The output folder gets:
 - `<workflow>.elaichi.json` for each workflow. Each file is `{ name, description, definition }`, which is the body of Elaichi's `POST /automation`.
 - `report.md`, which lists each trigger and step as mapped, needs work, or no match, and what to do about each.
 - `report.json`, the same report as data.
+- `migration-plan.json`, the work list for an AI coding agent: each open item, why, the original code, and the Elaichi limit it hits.
+
+### Check your edits
+
+After you (or your agent) edit the drafts:
+
+```bash
+npx -y github:trutohq/pipedream-to-elaichi check ./elaichi-drafts
+ELAICHI_API_TOKEN=elch_... npx -y github:trutohq/pipedream-to-elaichi validate ./elaichi-drafts
+```
+
+`check` runs on your computer. It lists each TODO still open and each shape problem, and exits 0 when only the review gate is left. `validate` asks Elaichi's own validator, which also checks toolboxes, tools and expressions. It saves nothing. Both take `--json`.
 
 ### Point steps at your toolboxes
 
 An Elaichi `call_tool` step names a stored toolbox (`tbx_…`). The importer cannot know yours, so it writes `tbx_REPLACE_<connector>` placeholders. Create a toolbox in Elaichi with the tools the report names, then run the importer again with that toolbox:
 
 ```bash
-bun src/cli.ts export.zip --toolbox slack=tbx_123 --toolbox notion=tbx_456
+npx -y github:trutohq/pipedream-to-elaichi export.zip --toolbox slack=tbx_123 --toolbox notion=tbx_456
 ```
 
 ### Create the drafts in Elaichi (optional)
 
 ```bash
-ELAICHI_API_TOKEN=elch_... bun src/cli.ts export.zip --push
+ELAICHI_API_TOKEN=elch_... npx -y github:trutohq/pipedream-to-elaichi push ./elaichi-drafts
 ```
 
-`--push` calls `POST https://api.elaichi.ai/automation` once for each workflow. That call only saves a draft. Elaichi keeps a draft even when it has problems and lists them, so you can fix them in the console. The tool never calls publish or enable. Create the token in Elaichi under **Settings → API tokens**. The token acts as you, so the drafts are yours.
+`push` creates the drafts from a folder you edited. To convert and create in one go, add `--push` to the convert command instead. Both call `POST https://api.elaichi.ai/automation` once for each workflow. That call only saves a draft. Elaichi keeps a draft even when it has problems and lists them, so you can fix them in the console. The tool never calls publish or enable. Create the token in Elaichi under **Settings → API tokens**. The token acts as you, so the drafts are yours.
 
 Then, for each draft in Elaichi:
 
@@ -57,7 +102,7 @@ Then, for each draft in Elaichi:
 | App action with a known Elaichi tool | `call_tool` | Mapped when every configured prop was carried into the arguments and you gave the toolbox. Otherwise it needs work, and the report lists the props left over. |
 | App action with no known Elaichi tool | A TODO `check` step | No match. The report says whether Elaichi has no connector for that app, or whether this tool's table just does not cover the action. |
 | Node.js code | A `code` step that wraps the original component, with its props and methods bound to `this` | Mapped, unless the code uses npm packages, network calls, `process.env`, connected accounts, data stores, `$.export`, `$.respond`, or files. Each of those is flagged. Check each code step in a dry run. |
-| Python, Go, Bash | A JavaScript `code` step that keeps the original in a comment and fails until you port it | Needs work. |
+| Python, Go, Bash | A JavaScript `code` step that keeps the original in a comment and fails until it is ported | Needs work. The report says if the code is plain logic (your agent can port it) or also calls the network or uses packages (those parts must become tool calls). |
 | `$.flow.delay(ms)` | A `wait` step after the code step | Mapped. Elaichi waits at most 1 hour, so a longer delay is capped and flagged. |
 | `$.flow.suspend()` | An `approve` step after the code step | Mapped. Code that sends the `resume_url` somewhere is flagged. |
 | `$.flow.exit()` | The code returns a marker, and a `filter` step after it skips the rest | Mapped. |

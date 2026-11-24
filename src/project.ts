@@ -1,11 +1,13 @@
 import { checkDefinition } from './check.ts'
 import { convertWorkflow } from './convert.ts'
-import { looksLikeWorkflow, parseWorkflow, type LoadedInput } from './parse.ts'
-import type { DraftBody, ProjectReport } from './types.ts'
+import { looksLikeWorkflow, parseWorkflow, type LoadedInput, type PdWorkflow } from './parse.ts'
+import { buildPlan, type MigrationPlan } from './plan.ts'
+import type { DraftBody, ProjectReport, WorkflowReport } from './types.ts'
 
 export interface ConvertedProject {
   drafts: { file: string; body: DraftBody }[]
   report: ProjectReport
+  plan: MigrationPlan
 }
 
 const slug = (s: string) =>
@@ -20,6 +22,7 @@ export function convertProject(input: LoadedInput, inputLabel: string, toolboxes
   const report: ProjectReport = { generated_at: now.toISOString(), input: inputLabel, workflows: [], not_converted: [], notes: [] }
   const drafts: ConvertedProject['drafts'] = []
   const usedNames = new Set<string>()
+  const parsed: { wf: PdWorkflow; report: WorkflowReport }[] = []
   const manifest = input.manifest
   const byPath = new Map((manifest?.workflows ?? []).filter(w => w.path).map(w => [w.path as string, w]))
 
@@ -50,7 +53,8 @@ export function convertProject(input: LoadedInput, inputLabel: string, toolboxes
     wr.shape_issues = checkDefinition(draft.definition)
     drafts.push({ file: outFile, body: draft })
     report.workflows.push(wr)
+    parsed.push({ wf, report: wr })
   }
   if (report.workflows.length === 0 && report.not_converted.length === 0) report.notes.push('No workflow files found in the input.')
-  return { drafts, report }
+  return { drafts, report, plan: buildPlan(report, parsed) }
 }

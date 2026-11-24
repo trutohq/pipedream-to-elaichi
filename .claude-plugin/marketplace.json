@@ -1,0 +1,12 @@
+{
+  "name": "pipedream-to-elaichi",
+  "owner": { "name": "Truto" },
+  "description": "Move Pipedream workflows to Elaichi with your coding agent.",
+  "plugins": [
+    {
+      "name": "pipedream-to-elaichi",
+      "source": "./",
+      "description": "Skill that converts a Pipedream project export into Elaichi workflow drafts and works through every TODO until they validate. Never publishes."
+    }
+  ]
+}

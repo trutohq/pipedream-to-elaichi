@@ -1,3 +1,5 @@
+import type { LimitId } from './limits.ts'
+
 // Elaichi workflow definition (the subset this importer writes) and the migration report.
 // The shapes follow Elaichi's live validator (`elaichi__automation__schema`): every object is strict,
 // so a step may carry only the fields its type allows. `check.ts` enforces that locally.
@@ -38,6 +40,33 @@ export interface DraftBody {
  */
 export type Status = 'mapped' | 'needs_work' | 'no_match'
 
+/**
+ * Kinds of work left on a step. AGENTS.md gives the procedure for each.
+ * - set_toolbox: the call_tool step names a placeholder toolbox (tbx_REPLACE_…)
+ * - write_tool_args: the tool's arguments are missing, partial or unchecked
+ * - port_code: rewrite the step's code (kept in a comment) as JavaScript
+ * - fix_code: the wrapped Node.js code uses something Elaichi code cannot do (see notes)
+ * - rebuild_with_tools: the step calls the network or a connected account; rebuild those calls as call_tool steps
+ * - find_tool: the app action is not in this importer's table; look for a matching Elaichi tool
+ * - no_connector: Elaichi has no connector for the app
+ * - reenter_secret: a redacted secret prop must be entered again
+ * - delete_step: the step has no job in Elaichi (for example returning an HTTP response)
+ * - rebuild_control_flow: branch arms need their place and conditions
+ * - manual: anything else; read the notes
+ */
+export type TodoKind =
+  | 'set_toolbox'
+  | 'write_tool_args'
+  | 'port_code'
+  | 'fix_code'
+  | 'rebuild_with_tools'
+  | 'find_tool'
+  | 'no_connector'
+  | 'reenter_secret'
+  | 'delete_step'
+  | 'rebuild_control_flow'
+  | 'manual'
+
 export interface StepReport {
   /** The Pipedream step name (`namespace`). */
   namespace: string
@@ -51,6 +80,10 @@ export interface StepReport {
   notes: string[]
   /** Set for steps that sat inside a control-flow branch in Pipedream. */
   branch?: string
+  /** What is left to do, as fixed kinds an AI coding agent can act on. Empty when nothing is left. See AGENTS.md. */
+  todo: TodoKind[]
+  /** Elaichi limits this step runs into (ids from src/limits.ts; migration-plan.json explains each). */
+  limits: LimitId[]
 }
 
 export interface TriggerReport {
@@ -58,6 +91,7 @@ export interface TriggerReport {
   became: string
   status: Status
   notes: string[]
+  limits?: LimitId[]
 }
 
 export interface WorkflowReport {
@@ -67,6 +101,8 @@ export interface WorkflowReport {
   pipedream_id?: string
   triggers: TriggerReport[]
   steps: StepReport[]
+  /** Workflow-wide Elaichi limits it runs into (too many steps or code steps). */
+  limits: LimitId[]
   /** Apps to connect again in Elaichi (Pipedream exports no credentials). */
   reconnect: string[]
   /** Secret props Pipedream redacted: re-enter them. */

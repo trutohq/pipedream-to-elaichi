@@ -168,3 +168,59 @@ export function placeholderSource(code: string, language: string, namespace: str
     `throw new Error(${JSON.stringify(`TODO: port the ${language} step "${namespace}" to JavaScript`)});`,
   ].join('\n')
 }
+
+export interface ForeignAnalysis {
+  /** Packages or modules beyond the small standard-library set whose job plain JavaScript does. */
+  packages: string[]
+  network: string[]
+  usesEnv: boolean
+  usesFiles: boolean
+  /** Pipedream helpers the code calls (pd.export, pd.flow.exit, …). */
+  pdApis: string[]
+}
+
+const PY_PLAIN = new Set(['json', 're', 'datetime', 'math', 'time', 'random', 'uuid', 'typing', 'collections', 'itertools', 'functools', 'string', 'decimal', 'statistics', 'copy', 'enum', 'dataclasses', 'textwrap', 'base64', 'os', 'sys', 'hashlib', 'hmac', 'csv', 'logging', 'urllib.parse', 'html', 'zoneinfo', 'calendar', 'pprint', 'operator', 'secrets'])
+const GO_PLAIN = new Set(['fmt', 'strings', 'strconv', 'encoding/json', 'time', 'math', 'sort', 'regexp', 'errors', 'unicode', 'bytes', 'encoding/base64', 'log', 'io', 'net/url', 'context', 'os', 'github.com/PipedreamHQ/pipedream-go'])
+const PY_NET: [RegExp, string][] = [[/\brequests\b/, 'requests'], [/\bhttpx\b/, 'httpx'], [/\burllib\.request\b|\burlopen\b|\burllib3\b/, 'urllib'], [/\baiohttp\b/, 'aiohttp'], [/\bhttp\.client\b/, 'http.client']]
+const pyPlain = (mod: string) => PY_PLAIN.has(mod) || PY_PLAIN.has(mod.split('.')[0] ?? '') && mod.split('.')[0] !== 'urllib'
+const SH_NET: [RegExp, string][] = [[/\bcurl\b/, 'curl'], [/\bwget\b/, 'wget']]
+
+/** What a Python, Go or Bash step uses, so the report can say whether porting it to JavaScript is enough. */
+export function analyzeForeign(code: string, language: string): ForeignAnalysis {
+  let packages: string[] = []
+  let network: string[] = []
+  let usesEnv = false
+  const pdApis = new Set<string>()
+  if (language === 'Python') {
+    const mods = [...code.matchAll(/^\s*(?:import\s+([\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*)|from\s+([\w.]+)\s+import)/gm)].flatMap(m =>
+      m[1] ? m[1].split(',').map(x => x.trim().split(/\s+/)[0] ?? '') : [m[2] ?? ''],
+    )
+    packages = mods.filter(m => m && !pyPlain(m) && !PY_NET.some(([re]) => re.test(m)) && m.split('.')[0] !== 'requests')
+    network = PY_NET.filter(([re]) => re.test(code)).map(([, l]) => l)
+    usesEnv = /\bos\.(environ|getenv)\b/.test(code)
+    for (const m of code.matchAll(/\bpd\.(export|respond|flow\.\w+|send\.\w+)\b/g)) pdApis.add(`pd.${m[1]}`)
+  } else if (language === 'Go') {
+    const block = /\bimport\s*\(([\s\S]*?)\)/.exec(code)?.[1] ?? ''
+    const single = [...code.matchAll(/\bimport\s+"([^"]+)"/g)].map(m => m[1] ?? '')
+    const mods = [...[...block.matchAll(/"([^"]+)"/g)].map(m => m[1] ?? ''), ...single]
+    packages = mods.filter(m => m && !GO_PLAIN.has(m) && m !== 'net/http')
+    if (mods.includes('net/http')) network.push('net/http')
+    usesEnv = /\bos\.Getenv\b/.test(code)
+    for (const m of code.matchAll(/\bpd\.(Export|Respond|Flow\w*)\b/g)) pdApis.add(`pd.${m[1]}`)
+  } else {
+    network = SH_NET.filter(([re]) => re.test(code)).map(([, l]) => l)
+    packages = [...code.matchAll(/\b(apt-get|pip3?|npm|brew)\s+install\b/g)].map(m => m[1] ?? '')
+    // An upper-case variable the script never sets itself comes from the environment.
+    const assigned = new Set([...code.matchAll(/(?:^|[\s;(])(?:export\s+|local\s+|read\s+(?:-\w+\s+)*)?([A-Za-z_]\w*)=/gm)].map(m => m[1]))
+    for (const m of code.matchAll(/\bread\s+(?:-\w+\s+)*([A-Za-z_]\w*)/g)) assigned.add(m[1])
+    usesEnv = [...code.matchAll(/\$\{?([A-Z][A-Z0-9_]*)\b/g)].some(m => !m[1]?.startsWith('PIPEDREAM_') && !assigned.has(m[1]))
+    for (const m of code.matchAll(/\$\{?(PIPEDREAM_\w+)/g)) pdApis.add(`$${m[1]}`)
+  }
+  return {
+    packages: [...new Set(packages)],
+    network,
+    usesEnv,
+    usesFiles: /["'`]\/tmp\b|\bos\.(Open|Create|ReadFile|WriteFile)\b/.test(code) || (language === 'Bash' && /\/tmp\b/.test(code)),
+    pdApis: [...pdApis],
+  }
+}

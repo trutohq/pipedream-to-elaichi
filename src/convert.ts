@@ -1,8 +1,9 @@
 import { appOf, findTool, NO_ELAICHI_CONNECTOR } from './catalog.ts'
-import { analyzeNode, languageOf, nodeShim, placeholderSource } from './code.ts'
+import { analyzeForeign, analyzeNode, languageOf, nodeShim, placeholderSource } from './code.ts'
 import { isObj, type Obj, type PdStep, type PdTrigger, type PdWorkflow } from './parse.ts'
 import { valueToJsonata, type RefContext, type StepRef } from './templates.ts'
-import type { Definition, DraftBody, Status, Step, StepReport, Trigger, TriggerReport, WorkflowReport } from './types.ts'
+import type { LimitId } from './limits.ts'
+import type { Definition, DraftBody, Status, Step, StepReport, TodoKind, Trigger, TriggerReport, WorkflowReport } from './types.ts'
 
 export interface ConvertOptions {
   /** Elaichi connector slug → stored toolbox id (`tbx_…`) to put in call_tool steps. */
@@ -121,22 +122,37 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
       : step.codePath
         ? `code in ${step.codePath}`
         : 'unrecognized step'
-  const needs = (note: string) => {
+  const todo = new Set<TodoKind>()
+  const limits = new Set<LimitId>()
+  const needs = (note: string, kind: TodoKind, limit?: LimitId) => {
     notes.push(note)
+    todo.add(kind)
+    if (limit) limits.add(limit)
     if (status === 'mapped') status = 'needs_work'
   }
-  if (scan.secrets.length > 0) needs(`Re-enter the redacted secret ${scan.secrets.length === 1 ? 'prop' : 'props'} ${scan.secrets.map(s => s.split(': ')[1]).join(', ')}.`)
+  const fix = (note: string, limit?: LimitId) => needs(note, 'fix_code', limit)
+  if (scan.secrets.length > 0) needs(`Re-enter the redacted secret ${scan.secrets.length === 1 ? 'prop' : 'props'} ${scan.secrets.map(s => s.split(': ')[1]).join(', ')}.`, 'reenter_secret')
 
   if (step.code !== undefined) {
     scan.reconnect.forEach(r => ctx.reconnect.add(r))
-    if (scan.reconnect.length > 0) needs(`Used connected account${scan.reconnect.length === 1 ? '' : 's'} ${scan.reconnect.join(', ')} in code; Elaichi code never sees credentials. Move those calls to call_tool steps.`)
+    if (scan.reconnect.length > 0) needs(`Used connected account${scan.reconnect.length === 1 ? '' : 's'} ${scan.reconnect.join(', ')} in code; Elaichi code never sees credentials. Move those calls to call_tool steps.`, 'rebuild_with_tools', 'code_no_credentials')
     const lang = languageOf(step.runtime, step.code)
     const key = ctx.keys.take(step.namespace)
     ctx.codeSteps++
     if (lang.name !== 'Node.js') {
       out.push({ key, type: 'code', name: clip(`TODO: port ${step.namespace} (${lang.name})`, 120), description: clip(`Was a ${lang.name} step in Pipedream. The original is kept in a comment; port it to JavaScript.`, 500), language: 'javascript', source: placeholderSource(step.code, lang.name, step.namespace) })
       became = 'code step that fails until ported'
-      needs(`${lang.name} step: Elaichi code steps run JavaScript only. Port it; the original is in the step's source.`)
+      const f = analyzeForeign(step.code, lang.name)
+      const blockers = [
+        ...(f.network.length > 0 ? [`calls the network (${f.network.join(', ')})`] : []),
+        ...(f.packages.length > 0 ? [`uses packages (${f.packages.join(', ')})`] : []),
+        ...(f.usesEnv ? ['reads environment variables'] : []),
+        ...(f.usesFiles ? ['uses files'] : []),
+      ]
+      needs(`${lang.name} step: Elaichi code steps run JavaScript only. Port it; the original is in the step's source.${f.pdApis.length > 0 ? ` Pipedream helpers used: ${f.pdApis.join(', ')}.` : ''}`, 'port_code', 'code_javascript_only')
+      if (blockers.length > 0) needs(`It ${blockers.join(', ')}. Elaichi code has no network, packages, environment or files, so porting alone is not enough: move those parts to call_tool steps or step input.`, 'rebuild_with_tools', f.network.length > 0 ? 'code_no_network' : f.packages.length > 0 ? 'code_no_packages' : f.usesEnv ? 'code_no_env' : 'code_no_files')
+      if (f.network.length > 0 && f.packages.length > 0) limits.add('code_no_packages')
+      else notes.push('Plain logic only: an AI coding agent can port it to JavaScript (see AGENTS.md).')
       ref = { key, kind: 'code' }
     } else {
       const a = analyzeNode(step.code)
@@ -151,24 +167,24 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
         const expr = r.kind === 'action' ? `steps.${r.key}.result` : r.kind === 'state_get' ? `steps.${r.key}.\`${r.stateKey}\`` : `steps.${r.key}`
         parts.push(`${quote(ns)}: {"$return_value": ${expr}}`)
       }
-      for (const ns of readable) if (ns !== 'trigger' && !ctx.refs.steps.has(ns)) needs(`Reads steps.${ns}, which is not an earlier converted step.`)
+      for (const ns of readable) if (ns !== 'trigger' && !ctx.refs.steps.has(ns)) fix(`Reads steps.${ns}, which is not an earlier converted step.`)
       const noteSet = new Set<string>()
       const propsConv = valueToJsonata(scan.values, ctx.refs, noteSet)
-      propsConv.problems.forEach(needs)
+      propsConv.problems.forEach(p => fix(p))
       const input = `{"steps": {${parts.join(', ')}}, "props": ${propsConv.expr}}`
-      if (input.length > MAX_EXPRESSION) needs('The step input expression is over 10,000 characters: pass fewer earlier results.')
+      if (input.length > MAX_EXPRESSION) fix('The step input expression is over 10,000 characters: pass fewer earlier results.')
 
-      if (!a.hasComponent) needs('No `export default defineComponent(...)` found: wrap the code so it returns its result.')
-      if (a.imports.length > 0) needs(`Uses npm packages (${a.imports.join(', ')}); Elaichi code cannot load packages. The imports are commented out.`)
-      if (a.network.length > 0) needs(`Makes network calls (${a.network.join(', ')}); Elaichi code has no network. Move each call to a call_tool step with a connected app.`)
-      if (a.usesAuth) needs('Reads connected-account credentials ($auth); Elaichi code never sees credentials. Use a call_tool step.')
-      if (a.usesEnv) needs('Reads process.env; environment variables are not exported and Elaichi code has none. Pass the values in the step input or a workflow setting.')
-      if (a.dataStoreProps.length > 0) needs(`Uses a data store (${a.dataStoreProps.join(', ')}); Elaichi code cannot read state. Add state.get before and state.set after this step, or use a collection.`)
-      if (a.usesExport) needs('Uses $.export; only the return value is passed on in Elaichi. Return everything later steps read.')
-      if (a.usesRespond) needs('Calls $.respond; Elaichi answers webhooks with 202 itself and a workflow cannot set the HTTP response. Remove it.')
-      if (a.usesRerun) needs('Calls $.flow.rerun; use a step retry or a repeat policy instead.')
-      if (a.usesFiles) needs('Uses /tmp or File Store files; Elaichi code has no file system. Use parse/file.write steps or a connected storage app.')
-      if (Buffer.byteLength(source) > MAX_CODE_SOURCE_BYTES) needs('The code is over 64 KB, the most an Elaichi code step holds: split it.')
+      if (!a.hasComponent) fix('No `export default defineComponent(...)` found: wrap the code so it returns its result.')
+      if (a.imports.length > 0) fix(`Uses npm packages (${a.imports.join(', ')}); Elaichi code cannot load packages. The imports are commented out.`, 'code_no_packages')
+      if (a.network.length > 0) needs(`Makes network calls (${a.network.join(', ')}); Elaichi code has no network. Move each call to a call_tool step with a connected app.`, 'rebuild_with_tools', 'code_no_network')
+      if (a.usesAuth) needs('Reads connected-account credentials ($auth); Elaichi code never sees credentials. Use a call_tool step.', 'rebuild_with_tools', 'code_no_credentials')
+      if (a.usesEnv) fix('Reads process.env; environment variables are not exported and Elaichi code has none. Pass the values in the step input or a workflow setting.', 'code_no_env')
+      if (a.dataStoreProps.length > 0) fix(`Uses a data store (${a.dataStoreProps.join(', ')}); Elaichi code cannot read state. Add state.get before and state.set after this step, or use a collection.`, 'state_per_workflow')
+      if (a.usesExport) fix('Uses $.export; only the return value is passed on in Elaichi. Return everything later steps read.')
+      if (a.usesRespond) fix('Calls $.respond; Elaichi answers webhooks with 202 itself and a workflow cannot set the HTTP response. Remove it.', 'webhook_always_202')
+      if (a.usesRerun) fix('Calls $.flow.rerun; use a step retry or a repeat policy instead.')
+      if (a.usesFiles) fix('Uses /tmp or File Store files; Elaichi code has no file system. Use parse/file.write steps or a connected storage app.', 'code_no_files')
+      if (Buffer.byteLength(source) > MAX_CODE_SOURCE_BYTES) fix('The code is over 64 KB, the most an Elaichi code step holds: split it.', 'code_max_64kb')
 
       out.push({ key, type: 'code', name: clip(step.namespace, 120), description: describe('Pipedream Node.js step, wrapped to run as-is. Check it in a dry run.', notes), language: 'javascript', source, input })
       became = 'code step'
@@ -182,9 +198,9 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
       for (const d of a.delays) {
         const wk = ctx.keys.take(`${key}_delay`)
         let seconds = d.ms === null ? 60 : Math.max(1, Math.round(d.ms / 1000))
-        if (d.ms === null) needs(`${d.text} has no literal duration; the wait step is set to 60 seconds. Set the real value.`)
+        if (d.ms === null) fix(`${d.text} has no literal duration; the wait step is set to 60 seconds. Set the real value.`)
         else if (seconds > MAX_WAIT_SECONDS) {
-          needs(`${d.text} waits ${Math.round(seconds / 60)} minutes; an Elaichi wait is at most 1 hour. Split the workflow (a schedule_once trigger or a cron that checks state).`)
+          fix(`${d.text} waits ${Math.round(seconds / 60)} minutes; an Elaichi wait is at most 1 hour. Split the workflow (a schedule_once trigger or a cron that checks state).`, 'wait_max_1_hour')
           seconds = MAX_WAIT_SECONDS
         }
         out.push({ key: wk, type: 'wait', name: clip(`Wait (from ${step.namespace})`, 120), description: clip(`Replaces ${d.text}. Pipedream paused only when the code reached that call; if it was inside an if, add a run_if here.`, 500), seconds })
@@ -205,7 +221,7 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
         if (s.timeoutMs !== null) approve.expires_after_seconds = Math.min(2592000, Math.max(300, Math.round(s.timeoutMs / 1000)))
         out.push(approve)
         became += ' + approve'
-        if (a.usesResumeUrl) needs('The code sends resume_url/cancel_url somewhere. Elaichi has no resume link: approvers answer in Elaichi or Slack. Remove that code, and add approvers beyond the owner if needed.')
+        if (a.usesResumeUrl) fix('The code sends resume_url/cancel_url somewhere. Elaichi has no resume link: approvers answer in Elaichi or Slack. Remove that code, and add approvers beyond the owner if needed.')
       }
     }
   } else if (step.componentKey) {
@@ -226,21 +242,20 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
         ref = { key, kind: 'state_get', stateKey: sk }
         became = `state.get ${sk}`
         notes.push(`Data store contents are not in the export: put the current value into state (or a collection) before you turn this on.`)
-        if (k === 'data_stores-get-record-or-create') needs('Pipedream created the record when it was missing; state.get returns nothing instead. Add a default where it is read.')
+        if (k === 'data_stores-get-record-or-create') needs('Pipedream created the record when it was missing; state.get returns nothing instead. Add a default where it is read.', 'manual')
       } else if (literal && k === 'data_stores-add-update-record') {
         const sk = stateKey(store, literal)
         const conv = valueToJsonata(scan.values.value ?? null, ctx.refs, noteSet)
-        conv.problems.forEach(needs)
+        conv.problems.forEach(p => needs(p, 'manual'))
         out.push({ key, type: 'state.set', name: clip(step.namespace, 120), description: describe(`Writes "${literal}" to workflow state (was data store "${store}").`, notes), state_key: sk, value: conv.expr })
         ref = { key, kind: 'other' }
         became = `state.set ${sk}`
-        if (scan.values.ttl !== undefined) needs('The record had a TTL; Elaichi state does not expire.')
+        if (scan.values.ttl !== undefined) needs('The record had a TTL; Elaichi state does not expire.', 'manual')
       } else {
         const why = keyVal === undefined ? '' : literal ? '' : ' with a key computed at run time'
         out.push(todoStep(key, step.namespace, `Pipedream data store action ${k}${why}. Use Elaichi state (fixed keys) or a collection (create one, then use collection.upsert / collection.query).`))
         became = 'TODO step'
-        status = 'needs_work'
-        notes.push('No automatic mapping: use state (fixed keys) or a collection.')
+        needs('No automatic mapping: use state (fixed keys) or a collection.', 'manual', 'state_per_workflow')
       }
       if (literal && stateKey(store, literal).split(':')[1] !== literal) notes.push(`State keys are lower case with no spaces: "${literal}" became "${stateKey(store, literal)}".`)
       notes.push('Elaichi state belongs to one workflow; a Pipedream data store could be shared. If other workflows use the same store, use a collection.')
@@ -248,13 +263,13 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
       const key = ctx.keys.take(step.namespace)
       out.push(todoStep(key, step.namespace, 'Returned an HTTP response. Elaichi answers webhooks with 202 at once and a workflow cannot set the response. Delete this step; if the caller needs data back, send it with a tool call instead.'))
       became = 'TODO step (delete it)'
-      needs('Elaichi always answers 202: delete this step.')
+      needs('Elaichi always answers 202: delete this step.', 'delete_step', 'webhook_always_202')
     } else if (app === 'http' || k === 'pipedream-send-http-request') {
       const key = ctx.keys.take(step.namespace)
       out.push(todoStep(key, step.namespace, `Made an HTTP request (${k}). Elaichi workflows cannot call arbitrary URLs: use a tool from a connected app, or a custom connector.`))
       became = 'TODO step'
+      needs('No web requests in Elaichi workflows: use a connected app\'s tool.', 'rebuild_with_tools', 'code_no_network')
       status = 'no_match'
-      notes.push('No web requests in Elaichi workflows: use a connected app\'s tool.')
     } else {
       const m = findTool(k)
       if (!m) {
@@ -267,26 +282,26 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
             : `${k} is not in this importer's table. Elaichi may still have a connector for "${app}": search the connector catalog.`
         out.push(todoStep(key, step.namespace, `${reason} Configured props: ${clip(JSON.stringify(scan.values), 300)}`))
         became = 'TODO step'
+        needs(reason, none ? 'no_connector' : k.startsWith('@') ? 'manual' : 'find_tool')
         status = 'no_match'
-        notes.push(reason)
       } else {
         const key = ctx.keys.take(step.namespace)
         const given = ctx.opts.toolboxes?.[m.slug]
         const toolbox = given ?? `tbx_REPLACE_${m.slug.replace(/[^a-z0-9]+/gi, '_')}`
         ctx.toolboxes.add(toolbox)
         const callStep: Step = { key, type: 'call_tool', name: clip(step.namespace, 120), description: '', toolbox_id: toolbox, tool: m.tool }
-        if (!given) needs(`Create a toolbox with ${m.slug}'s ${m.tool} tool and put its tbx_ id here (or pass --toolbox ${m.slug}=tbx_…).`)
+        if (!given) needs(`Create a toolbox with ${m.slug}'s ${m.tool} tool and put its tbx_ id here (or pass --toolbox ${m.slug}=tbx_…).`, 'set_toolbox')
         const mapped = m.args?.(scan.values) ?? null
         if (mapped) {
           const conv = valueToJsonata(mapped, ctx.refs, noteSet)
-          conv.problems.forEach(needs)
+          conv.problems.forEach(p => needs(p, 'write_tool_args'))
           callStep.args = conv.expr
           const unused = Object.entries(scan.values).filter(([name, v]) => !(m.argProps ?? []).includes(name) && v !== undefined && v !== null && v !== '')
-          if (unused.length > 0) needs(`These Pipedream props were not carried over: ${clip(unused.map(([n, v]) => `${n}=${JSON.stringify(v)}`).join(', '), 300)}. Add the matching ${m.tool} arguments by hand.`)
+          if (unused.length > 0) needs(`These Pipedream props were not carried over: ${clip(unused.map(([n, v]) => `${n}=${JSON.stringify(v)}`).join(', '), 300)}. Add the matching ${m.tool} arguments by hand.`, 'write_tool_args')
         } else {
-          needs(`Write the tool arguments. Pipedream had: ${clip(JSON.stringify(scan.values), 300)}`)
+          needs(`Write the tool arguments. Pipedream had: ${clip(JSON.stringify(scan.values), 300)}`, 'write_tool_args')
         }
-        if (m.unverified) needs(`Check this mapping: ${m.note ?? ''}`.trim())
+        if (m.unverified) needs(`Check this mapping: ${m.note ?? ''}`.trim(), 'write_tool_args')
         else if (m.note) notes.push(m.note)
         noteSet.forEach(n => notes.push(n))
         callStep.description = describe(`Was Pipedream action ${k}.`, notes.filter(n => n !== m.note))
@@ -299,22 +314,28 @@ function convertStep(step: PdStep, ctx: Ctx, branch?: string): { steps: Step[]; 
     const key = ctx.keys.take(step.namespace)
     out.push(todoStep(key, step.namespace, `Its code was in a separate file (${step.codePath}) and is not in this export. Paste it into a code step.`))
     became = 'TODO step'
-    needs('Code not in the export file.')
+    needs('Code not in the export file.', 'port_code')
   } else {
     const key = ctx.keys.take(step.namespace)
     out.push(todoStep(key, step.namespace, `This importer did not recognize the step's shape (fields: ${step.rawKeys.join(', ') || 'none'}). Rebuild it by hand.`))
     became = 'TODO step'
+    needs(`Unrecognized step shape (fields: ${step.rawKeys.join(', ') || 'none'}).`, 'manual')
     status = 'no_match'
-    notes.push(`Unrecognized step shape (fields: ${step.rawKeys.join(', ') || 'none'}).`)
   }
 
   if (step.disabled) {
     for (const s of out) s.run_if = 'false'
     notes.push('Disabled in Pipedream: kept, switched off with run_if "false".')
   }
+  // Open work is marked on the step itself, so `check` finds it in an edited draft.
+  const main = out[0]
+  if (status !== 'mapped' && main && !String(main.description ?? '').startsWith('TODO:')) {
+    const open = notes.find(n => !n.startsWith('Disabled in Pipedream')) ?? 'see the migration report'
+    main.description = clip(`TODO: ${open} ${main.description ?? ''}`.trim(), 500)
+  }
   return {
     steps: out,
-    report: { namespace: step.namespace, source, elaichi_keys: out.map(s => s.key), became, status, notes, ...(branch ? { branch } : {}) },
+    report: { namespace: step.namespace, source, elaichi_keys: out.map(s => s.key), became, status, notes, todo: [...todo], limits: [...limits], ...(branch ? { branch } : {}) },
     ref,
   }
 }
@@ -380,6 +401,7 @@ function convertTriggers(triggers: PdTrigger[], keys: Keys): { triggers: Trigger
   let crons = 0
   for (const t of triggers) {
     const notes: string[] = []
+    const tlimits: LimitId[] = []
     const kind = t.type === 'schedule' || t.type === 'cron' ? 'timer' : t.type === 'webhook' ? 'http' : t.type
     if (t.disabled) {
       reports.push({ source: `${kind} trigger`, became: 'nothing', status: 'needs_work', notes: ['Disabled in Pipedream, so it was not added. Add it in the console if you want it.'] })
@@ -410,6 +432,7 @@ function convertTriggers(triggers: PdTrigger[], keys: Keys): { triggers: Trigger
             fields[0] = every && Number(every[1] ?? 1) < 5 ? '*/5' : thin(minutes, wraps).join(',')
             notes.push(`Ran more often than every 5 minutes ("${cron}"); Elaichi's limit is every 5 minutes, so it is now "${fields.join(' ')}".`)
             status = 'needs_work'
+            tlimits.push('cron_min_5_minutes')
             cron = fields.join(' ')
           }
         }
@@ -443,7 +466,7 @@ function convertTriggers(triggers: PdTrigger[], keys: Keys): { triggers: Trigger
       if (notes.some(n => n.startsWith('Trigger settings not carried over'))) status = 'needs_work'
       crons++
       out.push({ key: keys.take('schedule'), type: 'cron', cron, timezone })
-      reports.push({ source: `timer${t.cron ? ` "${t.cron}"` : ''}`, became: `cron "${cron}" (${timezone})`, status, notes })
+      reports.push({ source: `timer${t.cron ? ` "${t.cron}"` : ''}`, became: `cron "${cron}" (${timezone})`, status, notes, ...(tlimits.length ? { limits: tlimits } : {}) })
     } else if (t.type === 'http' || t.type === 'webhook') {
       http = true
       if (webhooks >= 3) {
@@ -458,7 +481,7 @@ function convertTriggers(triggers: PdTrigger[], keys: Keys): { triggers: Trigger
       if (method && method !== 'POST' && method !== 'PUT') notes.push(`Pipedream took ${method} requests; Elaichi webhooks take POST or PUT only.`)
       if (t.props.response !== undefined || t.props.responseType !== undefined) notes.push('The trigger had a custom HTTP response; Elaichi cannot send one.')
       out.push({ key: keys.take('webhook'), type: 'webhook', auth: { scheme: 'token' }, methods })
-      reports.push({ source: 'http', became: 'webhook (token auth)', status, notes })
+      reports.push({ source: 'http', became: 'webhook (token auth)', status, notes, limits: ['webhook_always_202'] })
     } else {
       const what = t.type === 'source' ? `app event source${t.sourceKey ? ` ${t.sourceKey}` : ''}` : t.type === 'email' ? 'email trigger' : t.type === 'form' ? 'form trigger' : `${t.type} trigger`
       const hint =
@@ -470,7 +493,7 @@ function convertTriggers(triggers: PdTrigger[], keys: Keys): { triggers: Trigger
               ? 'Elaichi has a Slack trigger (message or reaction in fixed channels): add it in the console.'
               : 'Elaichi has no trigger for an event inside a connected app: point the app\'s own webhook at a webhook trigger, or poll it on a cron schedule.'
       notes.push(hint)
-      reports.push({ source: what, became: 'manual trigger (placeholder)', status: 'no_match', notes })
+      reports.push({ source: what, became: 'manual trigger (placeholder)', status: 'no_match', notes, limits: ['no_app_event_trigger'] })
     }
   }
   if (!out.some(t => t.type === 'manual') && out.length < 5) out.push({ key: keys.take('manual'), type: 'manual' })
@@ -520,16 +543,22 @@ export function convertWorkflow(wf: PdWorkflow, opts: ConvertOptions = {}): { dr
       elaichi_keys: [bk],
       became: 'branch step, every arm switched off',
       status: 'needs_work',
+      todo: ['rebuild_control_flow'],
+      limits: [],
       notes: [`${wf.branches.length} control-flow branch${wf.branches.length === 1 ? '' : 'es'} came over as one branch step at the end with every arm switched off (when "false"). The export does not say where each branch sat or its condition: move the step and write each arm's when.`],
     })
   }
   if (wf.deploymentsUnread) {
+    const ck = keys.take('control_flow_todo')
+    steps.push(todoStep(ck, 'control flow', 'The Pipedream workflow had control-flow branches in a shape this importer does not read. Rebuild them by hand.'))
     stepReports.push({
       namespace: '(control flow)',
       source: 'deployments',
-      elaichi_keys: [],
+      elaichi_keys: [ck],
       became: 'nothing',
       status: 'no_match',
+      todo: ['rebuild_control_flow'],
+      limits: [],
       notes: ['The workflow has control-flow branches ("deployments") in a shape this importer does not read. Rebuild those branches by hand, and please open an issue with the shape (secrets removed).'],
     })
   }
@@ -556,6 +585,9 @@ export function convertWorkflow(wf: PdWorkflow, opts: ConvertOptions = {}): { dr
       severity: 'fail',
     })
   }
+  const wlimits: LimitId[] = []
+  if (count(steps) > 50) wlimits.push('steps_max_50')
+  if (ctx.codeSteps > 10) wlimits.push('code_steps_max_10')
   if (count(steps) > 50) notes.push(`This draft has ${count(steps)} steps; Elaichi allows 50. Split it into two workflows (automation.call can join them).`)
   if (ctx.codeSteps > 10) notes.push(`This draft has ${ctx.codeSteps} code steps; Elaichi allows 10. Merge some, or replace them with transform/map_fields steps.`)
 
@@ -572,6 +604,7 @@ export function convertWorkflow(wf: PdWorkflow, opts: ConvertOptions = {}): { dr
     ...(wf.hashid ? { pipedream_id: wf.hashid } : {}),
     triggers: triggerReports,
     steps: stepReports,
+    limits: wlimits,
     reconnect: [...ctx.reconnect].sort(),
     secrets: [...ctx.secrets],
     notes,
