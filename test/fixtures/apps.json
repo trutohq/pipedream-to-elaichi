@@ -1,0 +1,68 @@
+{
+  "schema": "workflow.json/2026.01",
+  "name": "Ticket fan-out",
+  "description": "",
+  "inactive": false,
+  "settings": {},
+  "triggers": [
+    { "type": "http", "disabled": false, "props": {} },
+    { "type": "email", "disabled": false, "props": {} }
+  ],
+  "steps": [
+    {
+      "namespace": "card",
+      "lang": "nodejs20.x",
+      "props": { "trello": { "authProvisionId": "apn_t" }, "name": "{{steps.trigger.event.body.title}}" },
+      "uses": { "registry": true, "key": "trello-create-card", "version": "1.0.9" }
+    },
+    {
+      "namespace": "crm",
+      "lang": "nodejs20.x",
+      "props": { "acme_crm": { "authProvisionId": "apn_c" } },
+      "uses": { "registry": true, "key": "acme_crm-create-lead", "version": "0.1.0" }
+    },
+    {
+      "namespace": "page",
+      "lang": "nodejs20.x",
+      "props": { "notion": { "authProvisionId": "apn_n" }, "parent": { "__lv": { "label": "Tickets", "value": "db_1" } }, "title": "{{steps.trigger.event.body.title}}" },
+      "uses": { "registry": true, "key": "notion-create-page", "version": "1.0.3" }
+    },
+    {
+      "namespace": "discord",
+      "lang": "nodejs20.x",
+      "props": { "discord": { "authProvisionId": "apn_d" }, "channelId": "123", "message": "{{steps.page.$return_value.url}} {{steps.page.$return_value.title.toUpperCase()}}" },
+      "uses": { "registry": true, "key": "discord_bot-send-message", "version": "1.0.1" }
+    },
+    {
+      "namespace": "private_thing",
+      "lang": "nodejs20.x",
+      "props": {},
+      "uses": { "registry": true, "key": "@acme/sync-users", "version": "0.0.1" }
+    },
+    {
+      "namespace": "github_issue",
+      "lang": "nodejs20.x",
+      "props": { "github": { "authProvisionId": "apn_g" }, "repoFullname": "acme/app", "title": "x" },
+      "uses": { "registry": true, "key": "github-create-issue", "version": "0.4.3" }
+    },
+    {
+      "namespace": "get_url",
+      "lang": "nodejs20.x",
+      "props": { "url": "https://example.com" },
+      "uses": { "registry": true, "key": "http-send-get-request", "version": "0.0.1" }
+    },
+    { "namespace": "if_else_1", "type": "control-flow" }
+  ],
+  "deployments": {
+    "dep_abc": {
+      "steps": [
+        {
+          "namespace": "side_message",
+          "lang": "nodejs20.x",
+          "props": { "slack": { "authProvisionId": "apn_s" }, "conversation": "C1", "text": "side path" },
+          "uses": { "registry": true, "key": "slack_v2-send-message", "version": "1.0.0" }
+        }
+      ]
+    }
+  }
+}

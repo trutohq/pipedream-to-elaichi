@@ -1,0 +1,34 @@
+{
+  "schema": "workflow.json/2026.01",
+  "name": "Daily standup reminder",
+  "description": "Posts the open tasks to #standup every weekday.",
+  "inactive": false,
+  "settings": { "error_notification": true },
+  "triggers": [
+    { "type": "timer", "disabled": false, "props": { "cron": "0 9 * * 1-5", "timezone": "Europe/London" } }
+  ],
+  "steps": [
+    {
+      "namespace": "build_text",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "greeting": "Good morning" },
+      "uses": {
+        "registry": false,
+        "code": "export default defineComponent({\n  props: { greeting: { type: \"string\" } },\n  async run({ steps, $ }) {\n    return { text: `${this.greeting}, team. Post your update in this thread.` };\n  },\n});\n"
+      }
+    },
+    {
+      "namespace": "send_message",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": {
+        "slack": { "authProvisionId": "apn_xyz" },
+        "conversation": { "__lv": { "label": "#standup", "value": "C0123456789" } },
+        "text": "{{steps.build_text.$return_value.text}}"
+      },
+      "uses": { "registry": true, "key": "slack_v2-send-message-to-channel", "version": "0.3.2" }
+    }
+  ],
+  "deployments": {}
+}

@@ -1,0 +1,43 @@
+{
+  "schema": "workflow.json/2026.01",
+  "name": "Refund approval",
+  "description": "",
+  "inactive": true,
+  "settings": {},
+  "triggers": [
+    { "type": "timer", "disabled": false, "props": { "interval_seconds": 3600 } }
+  ],
+  "steps": [
+    {
+      "namespace": "wait_a_bit",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": {},
+      "uses": {
+        "registry": false,
+        "code": "export default defineComponent({\n  async run({ steps, $ }) {\n    $.flow.delay(15 * 60 * 1000);\n    return { queued: true };\n  },\n});\n"
+      }
+    },
+    {
+      "namespace": "ask_manager",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": {},
+      "uses": {
+        "registry": false,
+        "code": "export default defineComponent({\n  async run({ steps, $ }) {\n    const { resume_url, cancel_url } = $.flow.suspend(24 * 60 * 60 * 1000);\n    return { resume_url, cancel_url };\n  },\n});\n"
+      }
+    },
+    {
+      "namespace": "long_pause",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": {},
+      "uses": {
+        "registry": false,
+        "code": "export default defineComponent({\n  async run({ steps, $ }) {\n    if (!steps.wait_a_bit.$return_value.queued) {\n      return $.flow.exit(\"nothing queued\");\n    }\n    $.flow.delay(2 * 60 * 60 * 1000);\n  },\n});\n"
+      }
+    }
+  ],
+  "deployments": {}
+}

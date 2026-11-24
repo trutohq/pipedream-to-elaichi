@@ -1,0 +1,41 @@
+{
+  "schema": "workflow.json/2026.01",
+  "name": "Lead webhook",
+  "description": "",
+  "inactive": false,
+  "settings": {},
+  "triggers": [
+    { "type": "http", "disabled": false, "props": { "method": "GET", "path": "lead", "api_key": "<redacted>" } }
+  ],
+  "steps": [
+    {
+      "namespace": "enrich",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "api_key": "<redacted>" },
+      "uses": {
+        "registry": false,
+        "code": "import axios from \"axios\";\nexport default defineComponent({\n  async run({ steps, $ }) {\n    const email = steps.trigger.event.body.email;\n    const res = await axios.get(`https://enrich.example.com/?email=${email}&key=${process.env.ENRICH_KEY}`);\n    await $.respond({ status: 200, body: { ok: true } });\n    return res.data;\n  },\n});\n"
+      }
+    },
+    {
+      "namespace": "notify",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": {
+        "slack": { "authProvisionId": "apn_abc" },
+        "conversation": "C0999",
+        "text": "New lead {{steps.trigger.event.body[\"email\"]}} from {{steps.enrich.$return_value.company.name}}"
+      },
+      "uses": { "registry": true, "key": "slack_v2-send-message", "version": "1.0.0" }
+    },
+    {
+      "namespace": "reply",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "resStatusCode": 200, "resBody": "ok" },
+      "uses": { "registry": true, "key": "http-return-http-response", "version": "0.0.4" }
+    }
+  ],
+  "deployments": {}
+}

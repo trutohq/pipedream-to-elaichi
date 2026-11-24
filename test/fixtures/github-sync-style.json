@@ -1,0 +1,21 @@
+{
+  "schema": "workflow/2022.04",
+  "name": "Daily schedule text",
+  "settings": { "error_notification": true },
+  "triggers": [ { "id": "ti_abc123" } ],
+  "steps": [
+    {
+      "namespace": "list_events",
+      "runtime": "nodejs20.x",
+      "uses": "google_calendar-list-events@0.0.1",
+      "props": { "googleCalendar": { "authProvisionId": "apn_1" }, "calendarId": { "__lv": { "label": "me@example.com", "value": "me@example.com" } } }
+    },
+    { "namespace": "generate_text", "runtime": "nodejs20.x", "uses": "./generate_text/entry.js" },
+    {
+      "namespace": "send",
+      "runtime": "nodejs20.x",
+      "uses": "slack-send-message@0.0.1",
+      "props": { "slack": { "authProvisionId": "apn_2" }, "conversation": "C42", "text": "{{steps.generate_text.$return_value}}" }
+    }
+  ]
+}

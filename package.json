@@ -1,0 +1,16 @@
+{
+  "name": "pipedream-to-elaichi",
+  "version": "0.1.0",
+  "description": "Turn Pipedream workflow exports into Elaichi workflow drafts, with a report of what still needs work.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "pipedream-to-elaichi": "src/cli.ts" },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --strict --noEmit -p ."
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.5",
+    "typescript": "5"
+  }
+}

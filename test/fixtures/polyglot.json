@@ -1,0 +1,41 @@
+{
+  "schema": "workflow.json/2026.01",
+  "name": "New GitHub issue triage",
+  "description": "",
+  "inactive": false,
+  "settings": {},
+  "triggers": [
+    { "type": "source", "key": "github-new-issue-with-status", "disabled": false, "props": { "github": { "authProvisionId": "apn_gh" }, "repoFullname": "acme/app" } }
+  ],
+  "steps": [
+    {
+      "namespace": "score",
+      "lang": "python3.12",
+      "disabled": false,
+      "props": {},
+      "uses": { "registry": false, "code": "def handler(pd: \"pipedream\"):\n    title = pd.steps[\"trigger\"][\"event\"][\"title\"]\n    # a comment that ends */ early\n    return {\"score\": len(title)}\n" }
+    },
+    {
+      "namespace": "go_step",
+      "lang": "go1.21",
+      "disabled": false,
+      "props": {},
+      "uses": { "registry": false, "code": "package main\n\nimport pd \"github.com/PipedreamHQ/pipedream-go\"\n\nfunc main() { pd.Export(\"ok\", true) }\n" }
+    },
+    {
+      "namespace": "bash_step",
+      "lang": "bash",
+      "disabled": false,
+      "props": {},
+      "uses": { "registry": false, "code": "#!/bin/bash\necho \"hello\"\n" }
+    },
+    {
+      "namespace": "old_debug",
+      "lang": "nodejs20.x",
+      "disabled": true,
+      "props": {},
+      "uses": { "registry": false, "code": "export default defineComponent({ async run() { return {}; } });\n" }
+    }
+  ],
+  "deployments": {}
+}

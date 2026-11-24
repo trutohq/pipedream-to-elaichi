@@ -1,0 +1,51 @@
+{
+  "schema": "workflow.json/2026.01",
+  "name": "Dedupe signups",
+  "description": "",
+  "inactive": false,
+  "settings": {},
+  "triggers": [
+    { "type": "timer", "disabled": false, "props": { "cron": "*/1 * * * *" } }
+  ],
+  "steps": [
+    {
+      "namespace": "get_last",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "dataStore": { "__lv": { "label": "signups", "value": "ds_abc" } }, "key": "Last Seen", "addRecordIfNotFound": false },
+      "uses": { "registry": true, "key": "data_stores-get-record-or-create", "version": "0.0.5" }
+    },
+    {
+      "namespace": "save_last",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "dataStore": { "__lv": { "label": "signups", "value": "ds_abc" } }, "key": "Last Seen", "value": "{{steps.get_last.$return_value}}", "ttl": 3600 },
+      "uses": { "registry": true, "key": "data_stores-add-update-record", "version": "0.0.6" }
+    },
+    {
+      "namespace": "list_all",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "dataStore": { "__lv": { "label": "signups", "value": "ds_abc" } } },
+      "uses": { "registry": true, "key": "data_stores-list-records", "version": "0.0.3" }
+    },
+    {
+      "namespace": "dynamic_key",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "dataStore": { "__lv": { "label": "signups", "value": "ds_abc" } }, "key": "{{steps.get_last.$return_value.id}}", "value": "x" },
+      "uses": { "registry": true, "key": "data_stores-add-update-record", "version": "0.0.6" }
+    },
+    {
+      "namespace": "count_in_code",
+      "lang": "nodejs20.x",
+      "disabled": false,
+      "props": { "store": "<redacted>" },
+      "uses": {
+        "registry": false,
+        "code": "export default defineComponent({\n  props: { store: { type: \"data_store\" } },\n  async run({ steps, $ }) {\n    const n = (await this.store.get(\"count\")) || 0;\n    await this.store.set(\"count\", n + 1);\n    $.export(\"count\", n + 1);\n  },\n});\n"
+      }
+    }
+  ],
+  "deployments": {}
+}
