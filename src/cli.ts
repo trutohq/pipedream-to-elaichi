@@ -42,11 +42,14 @@ Options:
   --api-url <url>          Elaichi API base URL (default: https://api.elaichi.ai)
   --json                   check / validate / connections: print the result as JSON
   --force                  Overwrite drafts already in --out (this throws away any edits made to them).
-                           connections --apply: ignore an earlier connections-result.json (this can create connections twice)
+                           connections --apply: move an earlier connections-result.json to a timestamped backup and
+                           start over (this can create connections twice)
   --accounts-file <path>   connections: a saved Pipedream list-accounts answer. With credentials it holds live secrets.
   --map <file>             connections: JSON overrides, { "<pipedream app>": "<elaichi slug>" } or
                            { "<pipedream app>": { "connector", "authentication_method", "fields": { "<pipedream key>": "<elaichi field>" } } }
   --apply                  connections: create the importable connections in Elaichi (default is a dry run)
+  --retry-unknown          connections --apply: send again the accounts an earlier run got no clear answer for.
+                           Check Elaichi for those connections first.
   -h, --help               Show this help
 
 Writes one <workflow>.elaichi.json per workflow ({ name, description, definition }, the body of
@@ -58,6 +61,7 @@ export interface CliArgs {
   accountsFile?: string
   map?: string
   apply: boolean
+  retryUnknown: boolean
   /** True when --out was given. */
   outSet: boolean
   json: boolean
@@ -71,7 +75,7 @@ export interface CliArgs {
 }
 
 export function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { out: 'elaichi-drafts', toolboxes: {}, push: false, help: false, json: false, force: false, apply: false, outSet: false }
+  const args: CliArgs = { out: 'elaichi-drafts', toolboxes: {}, push: false, help: false, json: false, force: false, apply: false, retryUnknown: false, outSet: false }
   if (argv[0] === 'check' || argv[0] === 'validate' || argv[0] === 'push' || argv[0] === 'connections') {
     args.command = argv[0]
     argv = argv.slice(1)
@@ -90,6 +94,7 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (a === '--accounts-file') args.accountsFile = next()
     else if (a === '--map') args.map = next()
     else if (a === '--apply') args.apply = true
+    else if (a === '--retry-unknown') args.retryUnknown = true
     else if (a === '--push') args.push = true
     else if (a === '--json') args.json = true
     else if (a === '--force') args.force = true

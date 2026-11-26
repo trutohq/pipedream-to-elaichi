@@ -14,7 +14,7 @@ const ENV = { ELAICHI_API_TOKEN: 'elch_org_test_token' }
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers })
 /** Elaichi's 201: the connection is under `connection`. */
-const created = (id: string) => json({ connection: { id, connector_slug: 'x', status: 'active' } }, 201)
+const created = (id: string) => json({ connection: { id, connector_slug: 'x', status: 'active', credential_tested: true } }, 201)
 const oauth2Fields = [
   { name: 'access_token', label: 'Access token', required: true, secret: true },
   { name: 'refresh_token', label: 'Refresh token', required: false, secret: true },
@@ -51,7 +51,7 @@ interface Call {
 }
 
 /** A fake Elaichi API. `post` answers POST /connection; the default creates the connection. */
-function elaichi(post: Post = (b, n) => created(`conn_${n}_${b.connector_slug}`), oauthApps: Record<string, unknown> = ORG_OAUTH_APPS) {
+function elaichi(post: Post = (b, n) => created(`conn_${n}_${b.connector_slug}`), oauthApps: Record<string, unknown> = ORG_OAUTH_APPS, connectors: Record<string, unknown> = CONNECTORS) {
   const calls: Call[] = []
   let n = 0
   const f = (async (url: string, init?: RequestInit) => {
@@ -65,7 +65,7 @@ function elaichi(post: Post = (b, n) => created(`conn_${n}_${b.connector_slug}`)
       return app ? json(app) : json({ error: { code: 'not_found', message: 'No OAuth app' } }, 404)
     }
     m = /^\/connector\/([^/]+)$/.exec(path)
-    if (m?.[1] && method === 'GET') return CONNECTORS[m[1]] ? json(CONNECTORS[m[1]]) : json({ error: { code: 'not_found', message: 'No such connector' } }, 404)
+    if (m?.[1] && method === 'GET') return connectors[m[1]] ? json(connectors[m[1]]) : json({ error: { code: 'not_found', message: 'No such connector' } }, 404)
     if (path === '/connection' && method === 'POST') return post(JSON.parse(String(init?.body)), ++n)
     return json({ error: { code: 'not_found' } }, 404)
   }) as unknown as typeof fetch
@@ -115,6 +115,22 @@ describe('connections dry run', () => {
     await main(['connections', '--accounts-file', ACCOUNTS, '--out', out], ENV, () => {}, elaichi(undefined, { ...ORG_OAUTH_APPS, slack: { oauth_app_mode: 'byoa', client_id: 'someone_else' } }).f)
     expect(byId(readJson<ConnPlan>(join(out, 'connections-plan.json'))).apn_slack1?.status).toBe('org_oauth_app_needed')
   })
+  test('an OAuth connector that lists no oauth2 fields needs mapping: nothing is sent without the field list', async () => {
+    const out = outDir()
+    const api = elaichi(undefined, ORG_OAUTH_APPS, { ...CONNECTORS, slack: { slug: 'slack', auth_formats: ['oauth2'], auth_fields: {} } })
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, api.f)
+    expect(byId(readJson<ConnPlan>(join(out, 'connections-plan.json'))).apn_slack1?.status).toBe('needs_mapping')
+    expect(api.posts().map(c => JSON.parse(c.body as string).connector_slug)).not.toContain('slack')
+  })
+  test('an account with no id is a reconnect, so two accounts never share a resume key', async () => {
+    const dir = outDir()
+    const file = join(dir, 'acc.json')
+    writeFileSync(file, JSON.stringify({ data: [{ name: 'No id', app: { name_slug: 'sendgrid' }, credentials: { api_key: 'SENTINEL_SECRET_noid' } }] }))
+    const api = elaichi()
+    await main(['connections', '--accounts-file', file, '--out', dir, '--apply'], ENV, () => {}, api.f)
+    expect(readJson<ConnPlan>(join(dir, 'connections-plan.json')).accounts[0]?.status).toBe('reconnect')
+    expect(api.posts()).toEqual([])
+  })
   test('--map names the connector, method and fields', async () => {
     const out = outDir()
     expect(await main(['connections', '--accounts-file', ACCOUNTS, '--map', MAP, '--out', out], ENV, () => {}, elaichi().f)).toBe(0)
@@ -159,6 +175,7 @@ describe('connections --apply', () => {
       { connector_slug: 'acme-billing', name: 'Acme Billing', credentials: { authentication_method: 'api_key', values: { username: 'ops@acme.test', password: 'SENTINEL_SECRET_billing_password' } } },
     ])
     const results = readJson<ConnResult[]>(join(out, 'connections-result.json'))
+    expect(results.every(r => r.credential_tested === true)).toBe(true)
     expect(results.map(r => [r.pipedream_account_id, r.ok, r.connection_id])).toEqual([
       ['apn_slack1', true, 'conn_1_slack'],
       ['apn_sendgrid1', true, 'conn_2_sendgrid'],
@@ -252,7 +269,7 @@ describe('connections --apply', () => {
       ['apn_basic1', true, first[3]?.connection_id],
     ])
   })
-  test('the result file is written after each account, so a crash keeps what was created', async () => {
+  test('a pending marker is in the result file while each POST is in flight', async () => {
     const out = outDir()
     let seenDuringSecond: ConnResult[] | undefined
     const api = elaichi((_, n) => {
@@ -260,7 +277,51 @@ describe('connections --apply', () => {
       return created(`conn_${n}`)
     })
     await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, api.f)
-    expect(seenDuringSecond?.map(r => r.connection_id)).toEqual(['conn_1'])
+    expect(seenDuringSecond?.map(r => [r.pipedream_account_id, r.error_code ?? r.connection_id])).toEqual([
+      ['apn_slack1', 'conn_1'],
+      ['apn_sendgrid1', 'pending'],
+    ])
+  })
+  test('a network error or a 5xx is an unknown outcome: not sent again until --retry-unknown', async () => {
+    const out = outDir()
+    const first = elaichi((b, n) => {
+      if (b.connector_slug === 'sendgrid') return json({ error: { code: 'internal_error', message: 'Boom' } }, 500)
+      if (b.connector_slug === 'acme-billing') throw new Error('socket hang up')
+      return created(`conn_${n}`)
+    })
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, first.f)
+    const r1 = readJson<ConnResult[]>(join(out, 'connections-result.json'))
+    expect(r1.filter(r => r.error_code === 'unknown_outcome').map(r => r.pipedream_account_id)).toEqual(['apn_sendgrid1', 'apn_basic1'])
+    const again = elaichi()
+    const { lines, log } = capture()
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, log, again.f)
+    expect(again.posts()).toEqual([])
+    expect(lines.join('\n')).toContain('Check Elaichi for a sendgrid connection named "SendGrid" first')
+    const retry = elaichi()
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply', '--retry-unknown'], ENV, () => {}, retry.f)
+    expect(retry.posts().map(c => JSON.parse(c.body as string).connector_slug)).toEqual(['sendgrid', 'acme-billing'])
+  })
+  test('a crash between the POST and the write leaves pending, which a re-run treats as unknown', async () => {
+    const out = outDir()
+    writeFileSync(join(out, 'connections-result.json'), JSON.stringify([{ pipedream_account_id: 'apn_slack1', pipedream_app: 'slack', connector_slug: 'slack', connection_name: 'Slack — acme', ok: false, error_code: 'pending' }]))
+    const api = elaichi()
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, api.f)
+    expect(api.posts().map(c => JSON.parse(c.body as string).connector_slug)).not.toContain('slack')
+  })
+  test('--force keeps the earlier result as a timestamped backup', async () => {
+    const { out } = await applyWith((_, n) => created(`conn_${n}`))
+    const before = readFileSync(join(out, 'connections-result.json'), 'utf8')
+    const { lines, log } = capture()
+    expect(await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply', '--force'], ENV, log, elaichi().f)).toBe(0)
+    const backups = readdirSync(out).filter(f => /^connections-result\..+\.json$/.test(f))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(out, backups[0] as string), 'utf8')).toBe(before)
+    expect(lines.join('\n')).toContain('moved the earlier result')
+  })
+  test('credential_test_timeout says to try later', async () => {
+    const { results, lines } = await applyWith(errOn('sendgrid', 422, { code: 'credential_test_timeout', message: 'Too slow.' }))
+    expect(results.find(r => r.connector_slug === 'sendgrid')?.error_code).toBe('credential_test_timeout')
+    expect(lines.join('\n')).toContain('took too long')
   })
 })
 
@@ -292,7 +353,7 @@ describe('no secret leaves memory except in POST /connection', () => {
     const api = elaichi(() => new Response(`<html>upstream echoed ${SENTINEL}_x</html>`, { status: 502 }))
     const send = { connector_slug: 'sendgrid', credentials: { authentication_method: 'api_key', values: { api_key: `${SENTINEL}_x` } } }
     const [r] = await applyConnections([{ item: { pipedream_account_id: 'apn_1', pipedream_app: 'sendgrid', status: 'importable', reasons: [] }, send }], { token: 't', fetch: api.f })
-    expect(r).toMatchObject({ ok: false, error_code: 'http_502', error: '502' })
+    expect(r).toMatchObject({ ok: false, error_code: 'unknown_outcome', error: '502' })
     expect(JSON.stringify(r)).not.toContain(SENTINEL)
   })
   test('a Pipedream answer that is not JSON is not quoted back', async () => {

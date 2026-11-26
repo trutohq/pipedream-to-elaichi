@@ -107,7 +107,7 @@ PIPEDREAM_CLIENT_ID=… PIPEDREAM_CLIENT_SECRET=… ELAICHI_API_TOKEN=elch_… \
 Where the accounts come from:
 
 - Live: `GET https://api.pipedream.com/v1/accounts?include_credentials=true`, every page. Set `PIPEDREAM_CLIENT_ID` and `PIPEDREAM_CLIENT_SECRET` (an OAuth client from your workspace's [API settings](https://pipedream.com/settings/api)). Or set `PIPEDREAM_API_KEY` and `PIPEDREAM_ORG_ID` (your workspace id, `o_…`).
-- A file: `--accounts-file accounts.json`, a saved answer from that call (one `{ "data": [...] }`, an array of those pages, or an array of accounts). A Pipedream Connect `GET /v1/connect/{project_id}/accounts` answer works too. **A file with credentials holds live secrets.** Keep it private and delete it when you are done.
+- A file: `--accounts-file accounts.json`, a saved answer from that call (one `{ "data": [...] }`, an array of those pages, or an array of accounts). A Pipedream Connect `GET /v1/connect/{project_id}/accounts` answer works too. **A file with credentials holds live secrets.** Keep it private, keep it out of git (this repo's `.gitignore` skips `*accounts*.json`), and delete it when you are done.
 
 What each status means:
 
@@ -129,7 +129,7 @@ What each status means:
 }
 ```
 
-Key-based apps match by field name. Basic auth goes in as `api_key` with `username` and `password`. OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` writes the result after each account: a connection id, or Elaichi's error `code` (and `field`, for a field problem). It stops at once on 401, 403, 428, or 503 `connection_import_unavailable` (Elaichi's import is not live yet). Run it again in the same `--out` folder after you fix something: it skips the accounts it already created. `--force` ignores the earlier result, which can create connections twice.
+Only the fields the connector lists in `auth_fields` are sent. Key-based apps match by field name. Basic auth goes in as `api_key` with `username` and `password`. OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` writes the result after each account: a connection id, or Elaichi's error `code` (and `field`, for a field problem). It stops at once on 401, 403, 428, or 503 `connection_import_unavailable` (Elaichi's import is not live yet). Run it again in the same `--out` folder after you fix something: it skips the accounts it already created. If a send got no clear answer (a network error or a 5xx), the result says `unknown_outcome`, and a re-run does not send that account again: check Elaichi for a connection with that name first, then add `--retry-unknown`. `--force` moves the earlier result to a timestamped backup and starts over, which can create connections twice. Each created connection records `credential_tested`: whether Elaichi checked the credentials with the app.
 
 ## What maps to what
 

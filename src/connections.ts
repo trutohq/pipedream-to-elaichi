@@ -77,10 +77,19 @@ export interface ConnResult {
   pipedream_account_id: string
   pipedream_app: string
   connector_slug?: string
+  /** The connection name sent to Elaichi (the Pipedream account name), to find it in Elaichi. */
+  connection_name?: string
   ok: boolean
   connection_id?: string
   status?: string
-  /** Elaichi's error code: org_oauth_app_required, credential_test_failed, invalid_credentials, … */
+  /** From the 201 connection: whether Elaichi tested the credentials against the app. */
+  credential_tested?: boolean
+  /**
+   * Elaichi's error code: org_oauth_app_required, credential_test_failed, invalid_credentials, …
+   * Or this tool's own: `skipped` (not sent), `pending` (sent, no answer recorded yet) and `unknown_outcome`
+   * (no answer, or a 5xx: the connection may exist). A re-run does not send `pending` or `unknown_outcome`
+   * again without --retry-unknown.
+   */
   error_code?: string
   /** The field Elaichi named, for invalid_credentials. */
   field?: string
@@ -228,7 +237,6 @@ async function orgOAuthApp(slug: string, deps: Deps, cache: Map<string, { set: b
 
 /** Pipedream credential key → Elaichi oauth2 field. */
 const OAUTH_RENAME: Record<string, string> = { oauth_access_token: 'access_token', oauth_refresh_token: 'refresh_token' }
-const OAUTH2_DEFAULT_FIELDS = ['access_token', 'refresh_token', 'expires_at', 'scope']
 
 /** Fills a method's fields from the candidate values. Returns the values and any required field left empty. */
 function fill(fields: AuthField[], candidates: Record<string, string>, explicit: Record<string, string> | undefined): { values: Record<string, string>; missing: string[] } {
@@ -254,6 +262,11 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
   const app = appSlugOf(a)
   const item: ConnPlanItem = { pipedream_account_id: a.id ?? '(no id)', ...(a.name ? { pipedream_account_name: a.name } : {}), pipedream_app: app, status: 'reconnect', reasons: [] }
   const creds = credentialsOf(a)
+  if (!a.id) {
+    // The account id is the resume key for --apply: without one, a re-run could not tell this account from another.
+    item.reasons.push('Pipedream gave this account no id, so it cannot be imported safely. Connect it again in Elaichi.')
+    return { item }
+  }
   if (a.dead) {
     item.reasons.push('Pipedream marks this account dead. Connect it again in Elaichi.')
     return { item }
@@ -288,7 +301,13 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
     for (const [k, v] of Object.entries(creds)) candidates[OAUTH_RENAME[k] ?? k] = v
     if (a.expires_at && !candidates.expires_at) candidates.expires_at = a.expires_at
     if (!candidates.scope && Array.isArray(a.authorized_scopes) && a.authorized_scopes.length > 0) candidates.scope = a.authorized_scopes.join(' ')
-    const fields = connector.auth_fields?.oauth2 ?? OAUTH2_DEFAULT_FIELDS.map(name => ({ name, required: name === 'access_token' }))
+    const fields = connector.auth_fields?.oauth2
+    if (!fields || fields.length === 0) {
+      // Elaichi refuses values it does not list, so nothing is sent without the connector's own field list.
+      item.status = 'needs_mapping'
+      item.reasons.push(`Elaichi did not list the ${connector.slug} connector's oauth2 fields (auth_fields.oauth2), so the tool cannot tell what to send. Connect it again in Elaichi.`)
+      return { item }
+    }
     const r = fill(fields, candidates, explicit)
     if (r.missing.length > 0) {
       item.status = 'needs_mapping'
@@ -358,12 +377,19 @@ export async function planConnections(accounts: PdAccount[], map: ConnMap, deps:
   return { plan: { schema: 'pipedream-to-elaichi/connections-plan@1', generated_at: new Date().toISOString(), source, summary, accounts: classified.map(c => c.item) }, classified }
 }
 
+/** Error codes that leave it unknown whether Elaichi created the connection. */
+export const UNKNOWN_OUTCOME = ['pending', 'unknown_outcome']
+
 /**
- * Creates each importable connection with POST /connection, one at a time. Stops at a 401 or 403.
- * `skip` holds Pipedream account ids a previous run already created; `onResult` runs after each account, so a
- * result file can be written as the run goes.
+ * Creates each importable connection with POST /connection, one at a time. Stops at 401, 403, 428 or 503.
+ * `skip` holds Pipedream account ids not to send (created, or unknown outcome). `onPending` runs just before each
+ * POST and `onResult` just after, so a result file always shows an account in flight as `pending`.
  */
-export async function applyConnections(classified: Classified[], deps: Deps, opts: { skip?: Set<string>; onResult?: (r: ConnResult) => void } = {}): Promise<ConnResult[]> {
+export async function applyConnections(
+  classified: Classified[],
+  deps: Deps,
+  opts: { skip?: Set<string>; onPending?: (r: ConnResult) => void; onResult?: (r: ConnResult) => void } = {},
+): Promise<ConnResult[]> {
   const results: ConnResult[] = []
   const push = (r: ConnResult) => {
     results.push(r)
@@ -372,22 +398,33 @@ export async function applyConnections(classified: Classified[], deps: Deps, opt
   let stopped: string | undefined
   for (const c of classified) {
     if (!SENDABLE.includes(c.item.status) || !c.send || opts.skip?.has(c.item.pipedream_account_id)) continue
-    const base = { pipedream_account_id: c.item.pipedream_account_id, pipedream_app: c.item.pipedream_app, connector_slug: c.send.connector_slug }
+    const base = { pipedream_account_id: c.item.pipedream_account_id, pipedream_app: c.item.pipedream_app, connector_slug: c.send.connector_slug, ...(c.send.name ? { connection_name: c.send.name } : {}) }
     if (stopped) {
       push({ ...base, ok: false, error_code: 'skipped', error: `Not sent: ${stopped}` })
       continue
     }
+    opts.onPending?.({ ...base, ok: false, error_code: 'pending', error: 'Sent to Elaichi; no answer recorded. The connection may exist.' })
     let r: ApiResponse
     try {
       r = await call('POST', '/connection', c.send, deps, false)
     } catch (e) {
-      push({ ...base, ok: false, error: (e as Error).message })
+      push({ ...base, ok: false, error_code: 'unknown_outcome', error: (e as Error).message })
       continue
     }
     if (r.ok) {
       const j = r.json
-      const conn = isRecord(j) && isRecord(j.connection) ? j.connection : isRecord(j) && isRecord(j.result) ? j.result : j
-      push({ ...base, ok: true, ...(isRecord(conn) && typeof conn.id === 'string' ? { connection_id: conn.id } : {}), ...(isRecord(conn) && typeof conn.status === 'string' ? { status: conn.status } : {}) })
+      const conn = isRecord(j) && isRecord(j.connection) ? j.connection : j
+      push({
+        ...base,
+        ok: true,
+        ...(isRecord(conn) && typeof conn.id === 'string' ? { connection_id: conn.id } : {}),
+        ...(isRecord(conn) && typeof conn.status === 'string' ? { status: conn.status } : {}),
+        ...(isRecord(conn) && typeof conn.credential_tested === 'boolean' ? { credential_tested: conn.credential_tested } : {}),
+      })
+      continue
+    }
+    if (r.status >= 500 && r.status !== 503) {
+      push({ ...base, ok: false, error_code: 'unknown_outcome', error: `${r.status} ${r.code ?? ''} ${r.message ?? ''}`.replace(/\s+/g, ' ').trim() })
       continue
     }
     const d = isRecord(r.details) ? r.details : {}
@@ -412,6 +449,11 @@ export function errorHelp(code: string | undefined): string {
       return 'Set the same OAuth client as the organization\'s own OAuth app for this connector in Elaichi, then run --apply again: it skips the accounts already created.'
     case 'credential_test_failed':
       return 'Elaichi tested the credentials and the app refused them. Connect the account again in Elaichi.'
+    case 'credential_test_timeout':
+      return 'The app took too long to answer Elaichi\'s credential check. Run --apply again later, or connect the account again.'
+    case 'unknown_outcome':
+    case 'pending':
+      return 'No clear answer: the connection may exist. Check Elaichi for a connection with this name before you send it again with --retry-unknown.'
     case 'invalid_credentials':
     case 'missing_required_field':
     case 'invalid_field':

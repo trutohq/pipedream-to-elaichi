@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { CliArgs } from './cli.ts'
 import {
@@ -16,6 +16,7 @@ import {
   scrubber,
   secretsOf,
   SENDABLE,
+  UNKNOWN_OUTCOME,
 } from './connections.ts'
 
 const LABEL: Record<ConnStatus, string> = {
@@ -43,7 +44,12 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
   const resultFile = join(out, 'connections-result.json')
   // Results of an earlier --apply in this folder: accounts it created are skipped, so a re-run never creates them twice.
   let earlier: ConnResult[] = []
-  if (args.apply && existsSync(resultFile) && !args.force) {
+  let backup: string | undefined
+  if (args.apply && existsSync(resultFile) && args.force) {
+    // --force starts over, but never loses the record of what an earlier run created.
+    backup = join(out, `connections-result.${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
+    renameSync(resultFile, backup)
+  } else if (args.apply && existsSync(resultFile)) {
     try {
       const j = JSON.parse(readFileSync(resultFile, 'utf8')) as unknown
       if (!Array.isArray(j)) throw new Error('not a list')
@@ -137,11 +143,23 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
     return 0
   }
 
+  if (backup) log(`--force: moved the earlier result to ${backup}.`)
   const created = new Set(earlier.filter(r => r.ok).map(r => r.pipedream_account_id))
+  const unknown = earlier.filter(r => UNKNOWN_OUTCOME.includes(r.error_code ?? ''))
   const merged = new Map(earlier.map(r => [r.pipedream_account_id, r]))
   if (created.size > 0) log(`Skipping ${created.size} account${created.size === 1 ? '' : 's'} an earlier --apply created (${resultFile}).`)
+  const skip = new Set(created)
+  for (const r of unknown) {
+    if (args.retryUnknown) continue
+    skip.add(r.pipedream_account_id)
+    log(`Not sent again: ${r.pipedream_app} (${r.pipedream_account_id}). An earlier --apply got no clear answer, so it may already exist. Check Elaichi for a ${r.connector_slug ?? r.pipedream_app} connection named "${r.connection_name ?? r.pipedream_account_id}" first. If there is none, run again with --retry-unknown.`)
+  }
   const fresh = await applyConnections(classified, deps, {
-    skip: created,
+    skip,
+    onPending: r => {
+      merged.set(r.pipedream_account_id, r)
+      write('connections-result.json', [...merged.values()])
+    },
     onResult: r => {
       merged.set(r.pipedream_account_id, r)
       write('connections-result.json', [...merged.values()])
@@ -152,7 +170,7 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
   if (args.json) log(JSON.stringify({ ok: results.every(r => r.ok), results }, null, 2))
   else {
     for (const r of fresh)
-      log(r.ok ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id}).` : `Failed ${r.pipedream_app} (${r.pipedream_account_id}): ${r.error_code ?? ''}${r.field ? ` (field ${r.field})` : ''} ${r.error ?? ''} ${errorHelp(r.error_code)}`.replace(/\s+/g, ' ').trim())
+      log(r.ok ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id})${r.credential_tested === false ? ', credentials not tested by Elaichi' : ''}.` : `Failed ${r.pipedream_app} (${r.pipedream_account_id}): ${r.error_code ?? ''}${r.field ? ` (field ${r.field})` : ''} ${r.error ?? ''} ${errorHelp(r.error_code)}`.replace(/\s+/g, ' ').trim())
     log(`Result: ${resultFile}`)
   }
   return results.some(r => !r.ok) ? 2 : 0
