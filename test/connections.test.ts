@@ -40,7 +40,7 @@ interface Call {
 }
 
 /** A fake Elaichi API. `post` answers POST /connection; the default creates the connection. */
-function elaichi(post: Post = (b, n) => json({ id: `conn_${n}_${b.connector_slug}`, status: 'active' }, 201)) {
+function elaichi(post: Post = (b, n) => json({ id: `conn_${n}_${b.connector_slug}`, status: 'active' }, 201), oauthApps: Record<string, unknown> = ORG_OAUTH_APPS) {
   const calls: Call[] = []
   let n = 0
   const f = (async (url: string, init?: RequestInit) => {
@@ -48,7 +48,7 @@ function elaichi(post: Post = (b, n) => json({ id: `conn_${n}_${b.connector_slug
     calls.push({ method, url, body: init?.body ? String(init.body) : undefined, headers: (init?.headers ?? {}) as Record<string, string> })
     const path = new URL(url).pathname
     let m = /^\/connector\/([^/]+)\/oauth-app$/.exec(path)
-    if (m?.[1] && method === 'GET') return ORG_OAUTH_APPS[m[1]] ? json(ORG_OAUTH_APPS[m[1]]) : json({ error: { code: 'not_found', message: 'No OAuth app' } }, 404)
+    if (m?.[1] && method === 'GET') return oauthApps[m[1]] ? json(oauthApps[m[1]]) : json({ error: { code: 'not_found', message: 'No OAuth app' } }, 404)
     m = /^\/connector\/([^/]+)$/.exec(path)
     if (m?.[1] && method === 'GET') return CONNECTORS[m[1]] ? json(CONNECTORS[m[1]]) : json({ error: { code: 'not_found', message: 'No such connector' } }, 404)
     if (path === '/connection' && method === 'POST') return post(JSON.parse(String(init?.body)), ++n)
@@ -94,6 +94,11 @@ describe('connections dry run', () => {
       expect(Object.keys(c.headers).some(h => h.toLowerCase() === 'x-organization-id')).toBe(false)
     }
   })
+  test('an organization OAuth app with a different client id is not the client that issued the token', async () => {
+    const out = outDir()
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out], ENV, () => {}, elaichi(undefined, { slack: { client_id: 'someone_else' } }).f)
+    expect(byId(readJson<ConnPlan>(join(out, 'connections-plan.json'))).apn_slack1?.status).toBe('org_oauth_app_needed')
+  })
   test('--map names the connector, method and fields', async () => {
     const out = outDir()
     expect(await main(['connections', '--accounts-file', ACCOUNTS, '--map', MAP, '--out', out], ENV, () => {}, elaichi().f)).toBe(0)
@@ -114,7 +119,9 @@ describe('connections dry run', () => {
   })
   test('needs an Elaichi token, and refuses a positional argument', async () => {
     expect(await main(['connections', '--accounts-file', ACCOUNTS], {}, () => {}, elaichi().f)).toBe(1)
-    expect(await main(['connections', ACCOUNTS], ENV, () => {}, elaichi().f)).toBe(1)
+    const { lines, log } = capture()
+    expect(await main(['connections', ACCOUNTS, '--accounts-file', ACCOUNTS], ENV, log, elaichi().f)).toBe(1)
+    expect(lines.join('\n')).toContain('connections takes no folder or file')
   })
 })
 
@@ -187,12 +194,30 @@ describe('connections --apply', () => {
     expect(api.posts()).toHaveLength(3)
     expect(results.every(r => r.ok)).toBe(true)
   })
-  test('refuses to run --apply twice in one folder without --force', async () => {
-    const { out } = await applyWith((_, n) => json({ id: `conn_${n}` }, 201))
+  test('a second --apply skips what the first created, retries the rest, and keeps the old ids', async () => {
+    const { out, results: first } = await applyWith(errOn('slack', 409, { code: 'org_oauth_app_required', message: 'Set your own OAuth app.' }), ['--map', MAP])
+    expect(first.map(r => r.ok)).toEqual([false, true, true])
     const api = elaichi()
-    expect(await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, api.f)).toBe(1)
-    expect(api.calls).toEqual([])
-    expect(await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply', '--force'], ENV, () => {}, api.f)).toBe(0)
+    const { lines, log } = capture()
+    expect(await main(['connections', '--accounts-file', ACCOUNTS, '--map', MAP, '--out', out, '--apply'], ENV, log, api.f)).toBe(0)
+    expect(api.posts().map(c => JSON.parse(c.body as string).connector_slug)).toEqual(['slack'])
+    expect(lines.join('\n')).toContain('Skipping 2 accounts')
+    const merged = readJson<ConnResult[]>(join(out, 'connections-result.json'))
+    expect(merged.map(r => [r.pipedream_account_id, r.ok, r.connection_id])).toEqual([
+      ['apn_slack1', true, 'conn_1_slack'],
+      ['apn_sendgrid1', true, first[1]?.connection_id],
+      ['apn_acme1', true, first[2]?.connection_id],
+    ])
+  })
+  test('the result file is written after each account, so a crash keeps what was created', async () => {
+    const out = outDir()
+    let seenDuringSecond: ConnResult[] | undefined
+    const api = elaichi((_, n) => {
+      if (n === 2) seenDuringSecond = readJson<ConnResult[]>(join(out, 'connections-result.json'))
+      return json({ id: `conn_${n}` }, 201)
+    })
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, api.f)
+    expect(seenDuringSecond?.map(r => r.connection_id)).toEqual(['conn_1'])
   })
 })
 
@@ -226,6 +251,14 @@ describe('no secret leaves memory except in POST /connection', () => {
     const [r] = await applyConnections([{ item: { pipedream_account_id: 'apn_1', pipedream_app: 'sendgrid', status: 'importable', reasons: [] }, send }], { token: 't', fetch: api.f })
     expect(r).toMatchObject({ ok: false, error_code: 'http_502', error: '502' })
     expect(JSON.stringify(r)).not.toContain(SENTINEL)
+  })
+  test('a Pipedream answer that is not JSON is not quoted back', async () => {
+    const f = (async (url: string) =>
+      new URL(url).pathname === '/v1/oauth/token' ? json({ access_token: 'pd_access' }) : new Response(`{"data":[{"credentials":{"api_key":"${SENTINEL}_y"`, { status: 200 })) as unknown as typeof fetch
+    const { lines, log } = capture()
+    expect(await main(['connections', '--out', outDir()], { ...ENV, PIPEDREAM_CLIENT_ID: 'id', PIPEDREAM_CLIENT_SECRET: `${SENTINEL}_client` }, log, f)).toBe(1)
+    expect(lines.join('\n')).toContain('not JSON')
+    expect(lines.join('\n')).not.toContain(SENTINEL)
   })
   test('a broken accounts file is not quoted back', async () => {
     const dir = outDir()

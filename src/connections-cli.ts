@@ -6,6 +6,7 @@ import {
   applyConnections,
   CONN_STATUSES,
   type ConnMap,
+  type ConnResult,
   type ConnStatus,
   ElaichiError,
   errorHelp,
@@ -38,10 +39,19 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
   }
   const out = args.outSet ? args.out : 'elaichi-connections'
   const resultFile = join(out, 'connections-result.json')
+  // Results of an earlier --apply in this folder: accounts it created are skipped, so a re-run never creates them twice.
+  let earlier: ConnResult[] = []
   if (args.apply && existsSync(resultFile) && !args.force) {
-    rawLog(`Error: ${resultFile} already exists, so --apply already ran here. Running it again would create the same connections twice. Check that file, then use a new --out folder or add --force.`)
-    return 1
+    try {
+      const j = JSON.parse(readFileSync(resultFile, 'utf8')) as unknown
+      if (!Array.isArray(j)) throw new Error('not a list')
+      earlier = j as ConnResult[]
+    } catch {
+      rawLog(`Error: cannot read ${resultFile}. Fix or move it, or add --force to ignore it (that can create connections twice).`)
+      return 1
+    }
   }
+  const envScrub = scrubber([token, env.PIPEDREAM_CLIENT_SECRET, env.PIPEDREAM_API_KEY].filter((s): s is string => !!s))
 
   let map: ConnMap = {}
   if (args.map) {
@@ -78,7 +88,7 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
     try {
       accounts = await fetchPipedreamAccounts(env, fetchFn)
     } catch (e) {
-      rawLog(`Error: cannot list Pipedream accounts: ${(e as Error).message}`)
+      rawLog(envScrub(`Error: cannot list Pipedream accounts: ${(e as Error).message}`))
       return 1
     }
   }
@@ -124,11 +134,21 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
     return 0
   }
 
-  const results = await applyConnections(classified, deps)
+  const created = new Set(earlier.filter(r => r.ok).map(r => r.pipedream_account_id))
+  const merged = new Map(earlier.map(r => [r.pipedream_account_id, r]))
+  if (created.size > 0) log(`Skipping ${created.size} account${created.size === 1 ? '' : 's'} an earlier --apply created (${resultFile}).`)
+  const fresh = await applyConnections(classified, deps, {
+    skip: created,
+    onResult: r => {
+      merged.set(r.pipedream_account_id, r)
+      write('connections-result.json', [...merged.values()])
+    },
+  })
+  const results = [...merged.values()]
   write('connections-result.json', results)
   if (args.json) log(JSON.stringify({ ok: results.every(r => r.ok), results }, null, 2))
   else {
-    for (const r of results)
+    for (const r of fresh)
       log(r.ok ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id}).` : `Failed ${r.pipedream_app} (${r.pipedream_account_id}): ${r.error_code ?? ''}${r.field ? ` (field ${r.field})` : ''} ${r.error ?? ''} ${errorHelp(r.error_code)}`.replace(/\s+/g, ' ').trim())
     log(`Result: ${resultFile}`)
   }

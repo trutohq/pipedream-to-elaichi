@@ -128,7 +128,7 @@ What each status means:
 }
 ```
 
-OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` refuses to run twice in one `--out` folder (that would create the same connections twice) unless you add `--force`.
+OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` writes the result after each account. Run it again in the same `--out` folder after you fix something: it skips the accounts it already created. `--force` ignores the earlier result, which can create connections twice.
 
 ## What maps to what
 

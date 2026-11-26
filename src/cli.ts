@@ -42,7 +42,7 @@ Options:
   --api-url <url>          Elaichi API base URL (default: https://api.elaichi.ai)
   --json                   check / validate / connections: print the result as JSON
   --force                  Overwrite drafts already in --out (this throws away any edits made to them).
-                           connections --apply: run again although connections-result.json exists
+                           connections --apply: ignore an earlier connections-result.json (this can create connections twice)
   --accounts-file <path>   connections: a saved Pipedream list-accounts answer. With credentials it holds live secrets.
   --map <file>             connections: JSON overrides, { "<pipedream app>": "<elaichi slug>" } or
                            { "<pipedream app>": { "connector", "authentication_method", "fields": { "<pipedream key>": "<elaichi field>" } } }

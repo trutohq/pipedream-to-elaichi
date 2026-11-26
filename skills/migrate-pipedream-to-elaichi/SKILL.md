@@ -122,7 +122,7 @@ The export holds no credentials, so each app in `reconnect` needs an account in 
    npx -y github:trutohq/pipedream-to-elaichi connections --apply [--map map.json]
    ```
 
-   It posts one account at a time and writes `elaichi-connections/connections-result.json` (a connection id or an `error_code` per account). It refuses to run twice in the same folder, because that would create the same connections twice. Error codes: `org_oauth_app_required` (as `org_oauth_app_needed` above), `credential_test_failed` (the app refused the credentials: reconnect), `invalid_credentials` (fix the `--map` entry for the named `field`).
+   It posts one account at a time and writes `elaichi-connections/connections-result.json` (a connection id or an `error_code` per account). Run it again in the same folder after a fix (for example after the person sets the OAuth app): it skips the accounts it already created. Never add `--force`: that can create connections twice. Error codes: `org_oauth_app_required` (as `org_oauth_app_needed` above), `credential_test_failed` (the app refused the credentials: reconnect), `invalid_credentials` (fix the `--map` entry for the named `field`).
 4. Tell the person to delete any accounts file when you are done.
 
 ## When something does not fit

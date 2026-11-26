@@ -350,34 +350,42 @@ export async function planConnections(accounts: PdAccount[], map: ConnMap, deps:
   return { plan: { schema: 'pipedream-to-elaichi/connections-plan@1', generated_at: new Date().toISOString(), source, summary, accounts: classified.map(c => c.item) }, classified }
 }
 
-/** Creates each importable connection with POST /connection, one at a time. Stops at a 401 or 403. */
-export async function applyConnections(classified: Classified[], deps: Deps): Promise<ConnResult[]> {
+/**
+ * Creates each importable connection with POST /connection, one at a time. Stops at a 401 or 403.
+ * `skip` holds Pipedream account ids a previous run already created; `onResult` runs after each account, so a
+ * result file can be written as the run goes.
+ */
+export async function applyConnections(classified: Classified[], deps: Deps, opts: { skip?: Set<string>; onResult?: (r: ConnResult) => void } = {}): Promise<ConnResult[]> {
   const results: ConnResult[] = []
+  const push = (r: ConnResult) => {
+    results.push(r)
+    opts.onResult?.(r)
+  }
   let stopped: string | undefined
   for (const c of classified) {
-    if (c.item.status !== 'importable' || !c.send) continue
+    if (c.item.status !== 'importable' || !c.send || opts.skip?.has(c.item.pipedream_account_id)) continue
     const base = { pipedream_account_id: c.item.pipedream_account_id, pipedream_app: c.item.pipedream_app, connector_slug: c.send.connector_slug }
     if (stopped) {
-      results.push({ ...base, ok: false, error_code: 'skipped', error: `Not sent: ${stopped}` })
+      push({ ...base, ok: false, error_code: 'skipped', error: `Not sent: ${stopped}` })
       continue
     }
     let r: ApiResponse
     try {
       r = await call('POST', '/connection', c.send, deps, false)
     } catch (e) {
-      results.push({ ...base, ok: false, error: (e as Error).message })
+      push({ ...base, ok: false, error: (e as Error).message })
       continue
     }
     if (r.ok) {
       const j = r.json
       const conn = isRecord(j) && isRecord(j.connection) ? j.connection : isRecord(j) && isRecord(j.result) ? j.result : j
-      results.push({ ...base, ok: true, ...(isRecord(conn) && typeof conn.id === 'string' ? { connection_id: conn.id } : {}), ...(isRecord(conn) && typeof conn.status === 'string' ? { status: conn.status } : {}) })
+      push({ ...base, ok: true, ...(isRecord(conn) && typeof conn.id === 'string' ? { connection_id: conn.id } : {}), ...(isRecord(conn) && typeof conn.status === 'string' ? { status: conn.status } : {}) })
       continue
     }
     const d = isRecord(r.details) ? r.details : {}
     const field = typeof d.field === 'string' ? d.field : isRecord(r.json) && typeof r.json.field === 'string' ? r.json.field : undefined
     // Only the status, code and Elaichi's own message: never the raw body, which could echo what was sent.
-    results.push({ ...base, ok: false, error_code: r.code ?? `http_${r.status}`, ...(field ? { field } : {}), error: `${r.status} ${r.message ?? ''}`.trim() })
+    push({ ...base, ok: false, error_code: r.code ?? `http_${r.status}`, ...(field ? { field } : {}), error: `${r.status} ${r.message ?? ''}`.trim() })
     if (r.status === 401 || r.status === 403) stopped = `Elaichi answered ${r.status} ${r.code ?? ''} on an earlier account.`.replace(/\s+/g, ' ')
   }
   return results
@@ -387,7 +395,7 @@ export async function applyConnections(classified: Classified[], deps: Deps): Pr
 export function errorHelp(code: string | undefined): string {
   switch (code) {
     case 'org_oauth_app_required':
-      return 'Set the same OAuth client as the organization\'s own OAuth app for this connector in Elaichi, then run --apply again for the rest.'
+      return 'Set the same OAuth client as the organization\'s own OAuth app for this connector in Elaichi, then run --apply again: it skips the accounts already created.'
     case 'credential_test_failed':
       return 'Elaichi tested the credentials and the app refused them. Connect the account again in Elaichi.'
     case 'invalid_credentials':
@@ -440,7 +448,12 @@ export async function fetchPipedreamAccounts(env: PdEnv, fetchFn: typeof fetch =
     const q = new URLSearchParams({ ...params, include_credentials: 'true', ...(orgId ? { org_id: orgId } : {}) })
     const res = await fetchFn(`${base}${path}?${q}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } })
     if (!res.ok) throw new Error(`Pipedream answered ${res.status} on GET ${path}.`)
-    return (await res.json()) as { data?: unknown; page_info?: { end_cursor?: string | null } }
+    // This body carries credentials: a parse error message could quote it, so only the path is named.
+    try {
+      return JSON.parse(await res.text()) as { data?: unknown; page_info?: { end_cursor?: string | null } }
+    } catch {
+      throw new Error(`Pipedream sent an answer that is not JSON on GET ${path}.`)
+    }
   }
 
   const accounts: PdAccount[] = []
