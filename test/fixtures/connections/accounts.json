@@ -1,25 +1,113 @@
 {
-  "page_info": { "total_count": 7, "count": 7, "start_cursor": "YXBuXzE", "end_cursor": null },
+  "page_info": {
+    "total_count": 8,
+    "count": 8,
+    "start_cursor": "YXBuXzE",
+    "end_cursor": null
+  },
   "data": [
     {
       "id": "apn_slack1",
       "name": "Slack — acme",
-      "app": { "id": "app_OkrhR1", "name": "Slack", "name_slug": "slack" },
+      "app": {
+        "id": "app_OkrhR1",
+        "name": "Slack",
+        "name_slug": "slack"
+      },
       "healthy": true,
       "expires_at": "2026-12-01T10:00:00.000Z",
-      "authorized_scopes": ["chat:write", "channels:read"],
-      "credentials": { "oauth_access_token": "SENTINEL_SECRET_slack_access", "oauth_refresh_token": "SENTINEL_SECRET_slack_refresh", "oauth_client_id": "client_acme_slack", "oauth_uid": "SENTINEL_SECRET_uid@acme.test" }
+      "authorized_scopes": [
+        "chat:write",
+        "channels:read"
+      ],
+      "credentials": {
+        "oauth_access_token": "SENTINEL_SECRET_slack_access",
+        "oauth_refresh_token": "SENTINEL_SECRET_slack_refresh",
+        "oauth_client_id": "client_acme_slack",
+        "oauth_uid": "SENTINEL_SECRET_uid@acme.test"
+      }
     },
     {
       "id": "apn_sheets1",
       "name": "Google Sheets — acme",
-      "app": { "id": "app_sheets", "name": "Google Sheets" },
-      "credentials": { "oauth_access_token": "SENTINEL_SECRET_sheets_access", "oauth_refresh_token": "SENTINEL_SECRET_sheets_refresh", "oauth_client_id": "client_acme_google" }
+      "app": {
+        "id": "app_sheets",
+        "name": "Google Sheets"
+      },
+      "credentials": {
+        "oauth_access_token": "SENTINEL_SECRET_sheets_access",
+        "oauth_refresh_token": "SENTINEL_SECRET_sheets_refresh",
+        "oauth_client_id": "client_acme_google"
+      }
     },
-    { "id": "apn_github1", "name": "GitHub", "app": { "id": "app_gh", "name": "GitHub", "name_slug": "github" }, "credentials": null },
-    { "id": "apn_sendgrid1", "name": "SendGrid", "app": { "name": "SendGrid", "name_slug": "sendgrid" }, "credentials": { "api_key": "SENTINEL_SECRET_sendgrid_key" } },
-    { "id": "apn_acme1", "name": "Acme CRM", "app": { "name": "Acme CRM", "name_slug": "acme_crm" }, "credentials": { "token": "SENTINEL_SECRET_acme_token", "subdomain": "acme-eu" } },
-    { "id": "apn_trello1", "name": "Trello", "app": { "name": "Trello", "name_slug": "trello" }, "credentials": { "api_key": "SENTINEL_SECRET_trello_key", "token": "SENTINEL_SECRET_trello_token" } },
-    { "id": "apn_dead1", "name": "Old Notion", "app": { "name": "Notion", "name_slug": "notion" }, "dead": true, "credentials": { "oauth_access_token": "SENTINEL_SECRET_notion_access" } }
+    {
+      "id": "apn_github1",
+      "name": "GitHub",
+      "app": {
+        "id": "app_gh",
+        "name": "GitHub",
+        "name_slug": "github"
+      },
+      "credentials": null
+    },
+    {
+      "id": "apn_sendgrid1",
+      "name": "SendGrid",
+      "app": {
+        "name": "SendGrid",
+        "name_slug": "sendgrid"
+      },
+      "credentials": {
+        "api_key": "SENTINEL_SECRET_sendgrid_key"
+      }
+    },
+    {
+      "id": "apn_acme1",
+      "name": "Acme CRM",
+      "app": {
+        "name": "Acme CRM",
+        "name_slug": "acme_crm"
+      },
+      "credentials": {
+        "token": "SENTINEL_SECRET_acme_token",
+        "subdomain": "acme-eu"
+      }
+    },
+    {
+      "id": "apn_trello1",
+      "name": "Trello",
+      "app": {
+        "name": "Trello",
+        "name_slug": "trello"
+      },
+      "credentials": {
+        "api_key": "SENTINEL_SECRET_trello_key",
+        "token": "SENTINEL_SECRET_trello_token"
+      }
+    },
+    {
+      "id": "apn_dead1",
+      "name": "Old Notion",
+      "app": {
+        "name": "Notion",
+        "name_slug": "notion"
+      },
+      "dead": true,
+      "credentials": {
+        "oauth_access_token": "SENTINEL_SECRET_notion_access"
+      }
+    },
+    {
+      "id": "apn_basic1",
+      "name": "Acme Billing",
+      "app": {
+        "name": "Acme Billing",
+        "name_slug": "acme_billing"
+      },
+      "credentials": {
+        "username": "ops@acme.test",
+        "password": "SENTINEL_SECRET_billing_password"
+      }
+    }
   ]
 }

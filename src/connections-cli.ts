@@ -15,6 +15,7 @@ import {
   planConnections,
   scrubber,
   secretsOf,
+  SENDABLE,
 } from './connections.ts'
 
 const LABEL: Record<ConnStatus, string> = {
@@ -22,6 +23,7 @@ const LABEL: Record<ConnStatus, string> = {
   reconnect: 'reconnect',
   needs_mapping: 'needs mapping',
   org_oauth_app_needed: 'org OAuth app needed',
+  org_oauth_app_unknown: 'org OAuth app unknown',
   no_connector: 'no connector',
 }
 
@@ -124,13 +126,14 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
     for (const i of plan.accounts)
       log(`| ${cell(i.pipedream_app)} | ${cell(i.pipedream_account_name ?? i.pipedream_account_id)} | ${cell(i.connector_slug ?? '—')} | ${LABEL[i.status]} | ${cell(i.reasons.join(' ') || '—')} |`)
     log(CONN_STATUSES.map(s => `${LABEL[s]} ${plan.summary[s]}`).join(', '))
-    const reconnect = plan.accounts.filter(i => i.status !== 'importable')
+    const reconnect = plan.accounts.filter(i => !SENDABLE.includes(i.status))
     if (reconnect.length > 0) log(`Connect again in Elaichi (or fix the mapping first): ${[...new Set(reconnect.map(i => i.connector_slug ?? i.pipedream_app))].join(', ')}.`)
     log(`Plan (no secret values): ${join(out, 'connections-plan.json')}`)
   }
 
   if (!args.apply) {
-    if (!args.json) log(plan.summary.importable > 0 ? `Dry run: nothing was created. Add --apply to create the ${plan.summary.importable} importable connection${plan.summary.importable === 1 ? '' : 's'} in Elaichi.` : 'Dry run: nothing was created, and nothing is importable yet.')
+    const n = plan.summary.importable + plan.summary.org_oauth_app_unknown
+    if (!args.json) log(n > 0 ? `Dry run: nothing was created. Add --apply to send the ${n} importable connection${n === 1 ? '' : 's'} to Elaichi.` : 'Dry run: nothing was created, and nothing is importable yet.')
     return 0
   }
 

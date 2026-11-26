@@ -13,8 +13,10 @@
 // - Auth: an OAuth client (client credentials, POST /v1/oauth/token, token lasts 1 hour) or a user API key, which
 //   needs org_id to name the workspace (https://pipedream.com/docs/rest-api/auth, /docs/rest-api/overview).
 //
-// Elaichi side: GET /connector/:slug (auth_formats, auth_fields) and POST /connection with
-// { connector_slug, name, credentials: { authentication_method, values } }.
+// Elaichi side: GET /connector/:slug (auth_formats, auth_fields per method), GET /connector/:slug/oauth-app
+// ({ oauth_app_mode: "platform_default" | "byoa", client_id, … }; needs connector:manage) and POST /connection with
+// { connector_slug, name, credentials: { authentication_method, values } } → 201 { connection: { id, status } }.
+// Errors carry a `code`; a field problem names it in details.field (credentials.values.<field>).
 //
 // Secret rule: credential values live only in memory and in the POST /connection body. Every string this module
 // returns for printing or writing goes through a scrubber that blanks any credential value, as a second guard.
@@ -38,10 +40,14 @@ export interface PdAccount {
  * reconnect            — Pipedream returned no credentials (or the account is dead): connect it again in Elaichi.
  * needs_mapping        — credentials are present, but their keys do not match the connector's fields. Add a --map entry.
  * org_oauth_app_needed — an OAuth token: set the same OAuth client as the organization's own OAuth app for that connector first.
+ * org_oauth_app_unknown — an OAuth token, but the token may not read the organization's OAuth app (needs connector:manage).
+ *                         --apply still sends it; Elaichi answers org_oauth_app_required if the app is missing.
  * no_connector         — no Elaichi connector found for the app. Add a --map entry if it has another slug.
  */
-export type ConnStatus = 'importable' | 'reconnect' | 'needs_mapping' | 'org_oauth_app_needed' | 'no_connector'
-export const CONN_STATUSES: ConnStatus[] = ['importable', 'org_oauth_app_needed', 'needs_mapping', 'no_connector', 'reconnect']
+export type ConnStatus = 'importable' | 'reconnect' | 'needs_mapping' | 'org_oauth_app_needed' | 'org_oauth_app_unknown' | 'no_connector'
+export const CONN_STATUSES: ConnStatus[] = ['importable', 'org_oauth_app_unknown', 'org_oauth_app_needed', 'needs_mapping', 'no_connector', 'reconnect']
+/** Statuses --apply sends. */
+export const SENDABLE: ConnStatus[] = ['importable', 'org_oauth_app_unknown']
 
 export interface ConnPlanItem {
   pipedream_account_id: string
@@ -204,20 +210,18 @@ async function findConnector(app: string, map: ConnMap, deps: Deps, cache: Map<s
   return found
 }
 
-/** Whether the organization has its own OAuth app for the connector: true, false, or null when the token may not look. */
+/**
+ * The organization's OAuth app for a connector: GET /connector/:slug/oauth-app, which answers
+ * { oauth_app_mode: "platform_default" | "byoa", client_id, … }. `set` is null when the token may not look
+ * (403: needs connector:manage) or the answer is unexpected: then nothing is guessed.
+ */
 async function orgOAuthApp(slug: string, deps: Deps, cache: Map<string, { set: boolean | null; clientId?: string }>): Promise<{ set: boolean | null; clientId?: string }> {
   const hit = cache.get(slug)
   if (hit) return hit
   const r = await call('GET', `/connector/${encodeURIComponent(slug)}/oauth-app`, undefined, deps, false)
-  let out: { set: boolean | null; clientId?: string }
-  if (r.status === 404) out = { set: false }
-  else if (!r.ok) out = { set: null }
-  else {
-    const j = r.json
-    const app = isRecord(j) && 'oauth_app' in j ? j.oauth_app : isRecord(j) && 'result' in j ? j.result : j
-    const clientId = isRecord(app) && typeof app.client_id === 'string' ? app.client_id : undefined
-    out = isRecord(app) ? { set: true, ...(clientId ? { clientId } : {}) } : { set: false }
-  }
+  const j = isRecord(r.json) ? r.json : {}
+  const out: { set: boolean | null; clientId?: string } =
+    r.ok && j.oauth_app_mode === 'byoa' ? { set: true, ...(typeof j.client_id === 'string' ? { clientId: j.client_id } : {}) } : r.ok && j.oauth_app_mode === 'platform_default' ? { set: false } : { set: null }
   cache.set(slug, out)
   return out
 }
@@ -326,7 +330,7 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
     const pdClient = creds.oauth_client_id
     if (own.set === false) {
       item.status = 'org_oauth_app_needed'
-      item.reasons.push(`The token was issued by your own OAuth client in Pipedream. In Elaichi, set that same client as the organization's own OAuth app for ${connector.slug} (Connectors → ${connector.slug} → OAuth app), then run this again.`)
+      item.reasons.push(`The token was issued by your own OAuth client in Pipedream, and Elaichi uses its own client for ${connector.slug}. In Elaichi, set that same client as the organization's own OAuth app for ${connector.slug} (Connectors → ${connector.slug} → OAuth app), then run this again.`)
       return { item, send }
     }
     if (own.set && own.clientId && pdClient && own.clientId !== pdClient) {
@@ -334,7 +338,11 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
       item.reasons.push(`The organization's OAuth app for ${connector.slug} is a different client from the one that issued this token. Set the same client in Elaichi, or connect the account again.`)
       return { item, send }
     }
-    if (own.set === null) item.reasons.push(`Could not check the organization's OAuth app for ${connector.slug} (needs the connector:manage permission). --apply will say if it is missing.`)
+    if (own.set === null) {
+      item.status = 'org_oauth_app_unknown'
+      item.reasons.push(`Could not read the organization's OAuth app for ${connector.slug} (needs the connector:manage permission). --apply sends it; Elaichi answers org_oauth_app_required if the app is missing or a different client.`)
+      return { item, send }
+    }
   }
   if (a.healthy === false) item.reasons.push('Pipedream marks this account unhealthy. Elaichi tests the credentials and may refuse them.')
   item.status = 'importable'
@@ -363,7 +371,7 @@ export async function applyConnections(classified: Classified[], deps: Deps, opt
   }
   let stopped: string | undefined
   for (const c of classified) {
-    if (c.item.status !== 'importable' || !c.send || opts.skip?.has(c.item.pipedream_account_id)) continue
+    if (!SENDABLE.includes(c.item.status) || !c.send || opts.skip?.has(c.item.pipedream_account_id)) continue
     const base = { pipedream_account_id: c.item.pipedream_account_id, pipedream_app: c.item.pipedream_app, connector_slug: c.send.connector_slug }
     if (stopped) {
       push({ ...base, ok: false, error_code: 'skipped', error: `Not sent: ${stopped}` })
@@ -386,10 +394,16 @@ export async function applyConnections(classified: Classified[], deps: Deps, opt
     const field = typeof d.field === 'string' ? d.field : isRecord(r.json) && typeof r.json.field === 'string' ? r.json.field : undefined
     // Only the status, code and Elaichi's own message: never the raw body, which could echo what was sent.
     push({ ...base, ok: false, error_code: r.code ?? `http_${r.status}`, ...(field ? { field } : {}), error: `${r.status} ${r.message ?? ''}`.trim() })
-    if (r.status === 401 || r.status === 403) stopped = `Elaichi answered ${r.status} ${r.code ?? ''} on an earlier account.`.replace(/\s+/g, ' ')
+    if (STOP_STATUSES.includes(r.status)) stopped = `Elaichi answered ${r.status} ${r.code ?? ''} on an earlier account. ${errorHelp(r.code ?? `http_${r.status}`)}`.replace(/\s+/g, ' ').trim()
   }
   return results
 }
+
+/**
+ * Answers that make every later account fail the same way, so the run stops: 401 (token), 403 (permission),
+ * 428 (step-up, which an API token should never get) and 503 (connection_import_unavailable: Elaichi's import is not deployed).
+ */
+const STOP_STATUSES = [401, 403, 428, 503]
 
 /** What to do next for an apply error code. */
 export function errorHelp(code: string | undefined): string {
@@ -399,7 +413,25 @@ export function errorHelp(code: string | undefined): string {
     case 'credential_test_failed':
       return 'Elaichi tested the credentials and the app refused them. Connect the account again in Elaichi.'
     case 'invalid_credentials':
+    case 'missing_required_field':
+    case 'invalid_field':
+    case 'transform_failed':
       return 'A field is wrong or missing. Fix the --map entry for this app.'
+    case 'unsupported_authentication_method':
+      return 'The connector does not take this method. Pick another "authentication_method" in --map, or connect the account again.'
+    case 'integration_not_installed':
+      return 'This connector is not set up in your Elaichi organization. Add it in Elaichi, or connect the account again.'
+    case 'connection_import_unavailable':
+      return 'Elaichi cannot import connections yet. Nothing more was sent. Run --apply again later.'
+    case 'step_up_required':
+      return 'Elaichi asked to re-verify, which should not happen with an API token. Please report it to Elaichi support.'
+    case 'unauthorized':
+    case 'http_401':
+      return 'Check ELAICHI_API_TOKEN.'
+    case 'permission_required':
+    case 'forbidden':
+    case 'http_403':
+      return 'The token\'s owner lacks a permission. Read the message above.'
     case 'rate_limited':
     case 'http_429':
       return 'Rate limited. Wait, then run --apply again.'

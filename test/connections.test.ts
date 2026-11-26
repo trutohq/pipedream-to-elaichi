@@ -13,6 +13,8 @@ const SENTINEL = 'SENTINEL_SECRET'
 const ENV = { ELAICHI_API_TOKEN: 'elch_org_test_token' }
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers })
+/** Elaichi's 201: the connection is under `connection`. */
+const created = (id: string) => json({ connection: { id, connector_slug: 'x', status: 'active' } }, 201)
 const oauth2Fields = [
   { name: 'access_token', label: 'Access token', required: true, secret: true },
   { name: 'refresh_token', label: 'Refresh token', required: false, secret: true },
@@ -23,13 +25,22 @@ const CONNECTORS: Record<string, unknown> = {
   slack: { slug: 'slack', auth_formats: ['oauth2'], auth_fields: { oauth2: oauth2Fields } },
   googlesheets: { slug: 'googlesheets', auth_formats: ['oauth2'], auth_fields: { oauth2: oauth2Fields } },
   sendgrid: { slug: 'sendgrid', auth_formats: ['api_key'], auth_fields: { api_key: [{ name: 'api_key', label: 'API key', required: true, secret: true }] } },
+  // Basic auth comes in as api_key with username and password fields.
+  'acme-billing': {
+    slug: 'acme-billing',
+    auth_formats: ['api_key'],
+    auth_fields: { api_key: [{ name: 'username', label: 'Username', required: true, secret: false }, { name: 'password', label: 'Password', required: true, secret: true }] },
+  },
   'acme-crm': {
     slug: 'acme-crm',
     auth_formats: ['api_key'],
     auth_fields: { api_key: [{ name: 'api_token', label: 'API token', required: true, secret: true }, { name: 'domain', label: 'Domain', required: true, secret: false }] },
   },
 }
-const ORG_OAUTH_APPS: Record<string, unknown> = { slack: { client_id: 'client_acme_slack' } }
+const ORG_OAUTH_APPS: Record<string, unknown> = {
+  slack: { oauth_app_mode: 'byoa', client_id: 'client_acme_slack', has_client_secret: true, scope: 'chat:write' },
+  googlesheets: { oauth_app_mode: 'platform_default', client_id: 'elaichi_platform_client', has_client_secret: true },
+}
 
 type Post = (body: { connector_slug: string; credentials: { values: Record<string, string> } }, n: number) => Response
 interface Call {
@@ -40,7 +51,7 @@ interface Call {
 }
 
 /** A fake Elaichi API. `post` answers POST /connection; the default creates the connection. */
-function elaichi(post: Post = (b, n) => json({ id: `conn_${n}_${b.connector_slug}`, status: 'active' }, 201), oauthApps: Record<string, unknown> = ORG_OAUTH_APPS) {
+function elaichi(post: Post = (b, n) => created(`conn_${n}_${b.connector_slug}`), oauthApps: Record<string, unknown> = ORG_OAUTH_APPS) {
   const calls: Call[] = []
   let n = 0
   const f = (async (url: string, init?: RequestInit) => {
@@ -48,7 +59,11 @@ function elaichi(post: Post = (b, n) => json({ id: `conn_${n}_${b.connector_slug
     calls.push({ method, url, body: init?.body ? String(init.body) : undefined, headers: (init?.headers ?? {}) as Record<string, string> })
     const path = new URL(url).pathname
     let m = /^\/connector\/([^/]+)\/oauth-app$/.exec(path)
-    if (m?.[1] && method === 'GET') return oauthApps[m[1]] ? json(oauthApps[m[1]]) : json({ error: { code: 'not_found', message: 'No OAuth app' } }, 404)
+    if (m?.[1] && method === 'GET') {
+      const app = oauthApps[m[1]]
+      if (app === 'forbidden') return json({ error: { code: 'permission_required', message: 'You need connector:manage.' } }, 403)
+      return app ? json(app) : json({ error: { code: 'not_found', message: 'No OAuth app' } }, 404)
+    }
     m = /^\/connector\/([^/]+)$/.exec(path)
     if (m?.[1] && method === 'GET') return CONNECTORS[m[1]] ? json(CONNECTORS[m[1]]) : json({ error: { code: 'not_found', message: 'No such connector' } }, 404)
     if (path === '/connection' && method === 'POST') return post(JSON.parse(String(init?.body)), ++n)
@@ -81,7 +96,8 @@ describe('connections dry run', () => {
     expect(a.apn_sendgrid1).toMatchObject({ status: 'importable', authentication_method: 'api_key', fields: ['api_key'] })
     expect(a.apn_acme1).toMatchObject({ status: 'needs_mapping', connector_slug: 'acme-crm', pipedream_keys: ['subdomain', 'token'], elaichi_fields: { api_key: ['api_token', 'domain'] } })
     expect(a.apn_trello1?.status).toBe('no_connector')
-    expect(plan.summary).toEqual({ importable: 2, org_oauth_app_needed: 1, needs_mapping: 1, no_connector: 1, reconnect: 2 })
+    expect(a.apn_basic1).toMatchObject({ status: 'importable', connector_slug: 'acme-billing', authentication_method: 'api_key', fields: ['password', 'username'] })
+    expect(plan.summary).toEqual({ importable: 3, org_oauth_app_unknown: 0, org_oauth_app_needed: 1, needs_mapping: 1, no_connector: 1, reconnect: 2 })
     expect(lines.join('\n')).toContain('| slack | Slack — acme | slack | importable |')
     expect(lines.join('\n')).toContain('Dry run: nothing was created')
     expect(existsSync(join(out, 'connections-result.json'))).toBe(false)
@@ -96,7 +112,7 @@ describe('connections dry run', () => {
   })
   test('an organization OAuth app with a different client id is not the client that issued the token', async () => {
     const out = outDir()
-    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out], ENV, () => {}, elaichi(undefined, { slack: { client_id: 'someone_else' } }).f)
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out], ENV, () => {}, elaichi(undefined, { ...ORG_OAUTH_APPS, slack: { oauth_app_mode: 'byoa', client_id: 'someone_else' } }).f)
     expect(byId(readJson<ConnPlan>(join(out, 'connections-plan.json'))).apn_slack1?.status).toBe('org_oauth_app_needed')
   })
   test('--map names the connector, method and fields', async () => {
@@ -140,12 +156,14 @@ describe('connections --apply', () => {
       },
       { connector_slug: 'sendgrid', name: 'SendGrid', credentials: { authentication_method: 'api_key', values: { api_key: 'SENTINEL_SECRET_sendgrid_key' } } },
       { connector_slug: 'acme-crm', name: 'Acme CRM', credentials: { authentication_method: 'api_key', values: { api_token: 'SENTINEL_SECRET_acme_token', domain: 'acme-eu' } } },
+      { connector_slug: 'acme-billing', name: 'Acme Billing', credentials: { authentication_method: 'api_key', values: { username: 'ops@acme.test', password: 'SENTINEL_SECRET_billing_password' } } },
     ])
     const results = readJson<ConnResult[]>(join(out, 'connections-result.json'))
     expect(results.map(r => [r.pipedream_account_id, r.ok, r.connection_id])).toEqual([
       ['apn_slack1', true, 'conn_1_slack'],
       ['apn_sendgrid1', true, 'conn_2_sendgrid'],
       ['apn_acme1', true, 'conn_3_acme-crm'],
+      ['apn_basic1', true, 'conn_4_acme-billing'],
     ])
     expect(lines.join('\n')).toContain('Created connection conn_1_slack')
   })
@@ -158,7 +176,7 @@ describe('connections --apply', () => {
     return { code, api, lines, out, results: readJson<ConnResult[]>(join(out, 'connections-result.json')) }
   }
   const errOn = (slug: string, status: number, error: Record<string, unknown>, headers?: Record<string, string>): Post => (b, n) =>
-    b.connector_slug === slug ? json({ error }, status, headers) : json({ id: `conn_${n}`, status: 'active' }, 201)
+    b.connector_slug === slug ? json({ error }, status, headers) : created(`conn_${n}`)
 
   test('org_oauth_app_required', async () => {
     const { code, results, lines } = await applyWith(errOn('slack', 409, { code: 'org_oauth_app_required', message: 'Set your own OAuth app for slack first.' }))
@@ -172,14 +190,38 @@ describe('connections --apply', () => {
     expect(results.find(r => r.connector_slug === 'sendgrid')).toMatchObject({ ok: false, error_code: 'credential_test_failed' })
   })
   test('invalid_credentials names the field', async () => {
-    const { results, lines } = await applyWith(errOn('sendgrid', 400, { code: 'invalid_credentials', message: 'api_key is not valid.', details: { field: 'api_key' } }))
-    expect(results.find(r => r.connector_slug === 'sendgrid')).toMatchObject({ ok: false, error_code: 'invalid_credentials', field: 'api_key' })
-    expect(lines.join('\n')).toContain('(field api_key)')
+    const { results, lines } = await applyWith(errOn('sendgrid', 422, { code: 'invalid_credentials', message: 'api_key is not valid.', details: { field: 'credentials.values.api_key' } }))
+    expect(results.find(r => r.connector_slug === 'sendgrid')).toMatchObject({ ok: false, error_code: 'invalid_credentials', field: 'credentials.values.api_key' })
+    expect(lines.join('\n')).toContain('(field credentials.values.api_key)')
+  })
+  test('a bare { code } error body is read too', async () => {
+    const { results, lines } = await applyWith((b, n) => (b.connector_slug === 'sendgrid' ? json({ code: 'unsupported_authentication_method', message: 'No api_key here.' }, 422) : created(`conn_${n}`)))
+    expect(results.find(r => r.connector_slug === 'sendgrid')).toMatchObject({ ok: false, error_code: 'unsupported_authentication_method' })
+    expect(lines.join('\n')).toContain('Pick another "authentication_method"')
+  })
+  test('503 connection_import_unavailable stops the run and says so', async () => {
+    const { results, api, lines } = await applyWith(() => json({ error: { code: 'connection_import_unavailable', message: 'Connection import is not available yet.' } }, 503))
+    expect(api.posts()).toHaveLength(1)
+    expect(results.map(r => r.error_code)).toEqual(['connection_import_unavailable', 'skipped', 'skipped'])
+    expect(lines.join('\n')).toContain('Elaichi cannot import connections yet')
+  })
+  test('428 step_up_required stops the run and asks to report it', async () => {
+    const { results, api, lines } = await applyWith(() => json({ error: { code: 'step_up_required', message: 'Re-verify.' } }, 428))
+    expect(api.posts()).toHaveLength(1)
+    expect(results[0]).toMatchObject({ ok: false, error_code: 'step_up_required' })
+    expect(lines.join('\n')).toContain('report it to Elaichi support')
+  })
+  test('org OAuth app unknown (403 on oauth-app) is not guessed: the dry run says so and --apply sends it', async () => {
+    const out = outDir()
+    const api = elaichi(undefined, { ...ORG_OAUTH_APPS, slack: 'forbidden' })
+    await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, api.f)
+    expect(byId(readJson<ConnPlan>(join(out, 'connections-plan.json'))).apn_slack1?.status).toBe('org_oauth_app_unknown')
+    expect(api.posts().map(c => JSON.parse(c.body as string).connector_slug)).toContain('slack')
   })
   test('401 stops the run: later accounts are not sent', async () => {
     const { results, api } = await applyWith(() => json({ error: { code: 'unauthorized', message: 'Bad token' } }, 401))
     expect(api.posts()).toHaveLength(1)
-    expect(results.map(r => r.error_code)).toEqual(['unauthorized', 'skipped'])
+    expect(results.map(r => r.error_code)).toEqual(['unauthorized', 'skipped', 'skipped'])
   })
   test('429 waits for Retry-After once, then sends again', async () => {
     let first = true
@@ -188,25 +230,26 @@ describe('connections --apply', () => {
         first = false
         return json({ error: { code: 'rate_limited', message: 'Slow down' } }, 429, { 'Retry-After': '0.001' })
       }
-      return json({ id: `conn_${n}`, status: 'active' }, 201)
+      return created(`conn_${n}`)
     }
     const { results, api } = await applyWith(post)
-    expect(api.posts()).toHaveLength(3)
+    expect(api.posts()).toHaveLength(4)
     expect(results.every(r => r.ok)).toBe(true)
   })
   test('a second --apply skips what the first created, retries the rest, and keeps the old ids', async () => {
     const { out, results: first } = await applyWith(errOn('slack', 409, { code: 'org_oauth_app_required', message: 'Set your own OAuth app.' }), ['--map', MAP])
-    expect(first.map(r => r.ok)).toEqual([false, true, true])
+    expect(first.map(r => r.ok)).toEqual([false, true, true, true])
     const api = elaichi()
     const { lines, log } = capture()
     expect(await main(['connections', '--accounts-file', ACCOUNTS, '--map', MAP, '--out', out, '--apply'], ENV, log, api.f)).toBe(0)
     expect(api.posts().map(c => JSON.parse(c.body as string).connector_slug)).toEqual(['slack'])
-    expect(lines.join('\n')).toContain('Skipping 2 accounts')
+    expect(lines.join('\n')).toContain('Skipping 3 accounts')
     const merged = readJson<ConnResult[]>(join(out, 'connections-result.json'))
     expect(merged.map(r => [r.pipedream_account_id, r.ok, r.connection_id])).toEqual([
       ['apn_slack1', true, 'conn_1_slack'],
       ['apn_sendgrid1', true, first[1]?.connection_id],
       ['apn_acme1', true, first[2]?.connection_id],
+      ['apn_basic1', true, first[3]?.connection_id],
     ])
   })
   test('the result file is written after each account, so a crash keeps what was created', async () => {
@@ -214,7 +257,7 @@ describe('connections --apply', () => {
     let seenDuringSecond: ConnResult[] | undefined
     const api = elaichi((_, n) => {
       if (n === 2) seenDuringSecond = readJson<ConnResult[]>(join(out, 'connections-result.json'))
-      return json({ id: `conn_${n}` }, 201)
+      return created(`conn_${n}`)
     })
     await main(['connections', '--accounts-file', ACCOUNTS, '--out', out, '--apply'], ENV, () => {}, api.f)
     expect(seenDuringSecond?.map(r => r.connection_id)).toEqual(['conn_1'])
@@ -225,7 +268,7 @@ describe('no secret leaves memory except in POST /connection', () => {
   const filesIn = (dir: string) => readdirSync(dir).map(f => readFileSync(join(dir, f), 'utf8'))
   test('dry run, apply success and an error that echoes the secret', async () => {
     // An Elaichi error that quotes what it was sent: the scrubber must still keep it out of logs and files.
-    const echo: Post = (b, n) => (b.connector_slug === 'sendgrid' ? json({ error: { code: 'invalid_credentials', message: `bad key ${b.credentials.values.api_key}`, details: { field: 'api_key' } } }, 400) : json({ id: `conn_${n}` }, 201))
+    const echo: Post = (b, n) => (b.connector_slug === 'sendgrid' ? json({ error: { code: 'invalid_credentials', message: `bad key ${b.credentials.values.api_key}`, details: { field: 'api_key' } } }, 400) : created(`conn_${n}`))
     for (const [args, post] of [
       [[], undefined],
       [['--apply'], undefined],

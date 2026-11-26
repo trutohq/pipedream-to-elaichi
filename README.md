@@ -114,7 +114,8 @@ What each status means:
 | Status | Meaning | What to do |
 |---|---|---|
 | importable | Credentials are present and fit an Elaichi auth method. | `--apply` creates the connection. |
-| org OAuth app needed | An OAuth token. Pipedream returns those only for accounts on your own OAuth client, and Elaichi needs that same client. | In Elaichi, set that client as the organization's own OAuth app for the connector. Run again. |
+| org OAuth app needed | An OAuth token. Pipedream returns those only for accounts on your own OAuth client, and Elaichi needs that same client. Elaichi still uses its own client, or a different one. | In Elaichi, set that client as the organization's own OAuth app for the connector. Run again. |
+| org OAuth app unknown | An OAuth token, but your token may not read the connector's OAuth app (that needs the `connector:manage` permission). | `--apply` sends it. If the app is missing, Elaichi answers `org_oauth_app_required`. |
 | needs mapping | Credentials are present, but their key names do not match the connector's fields. | Add a `--map` entry. The plan lists both key lists (names only). |
 | no connector | No Elaichi connector matched the app's slug. | Add a `--map` entry if Elaichi has it under another slug. |
 | reconnect | Pipedream returned no credentials, or the account is dead. | Connect it again in Elaichi. |
@@ -128,7 +129,7 @@ What each status means:
 }
 ```
 
-OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` writes the result after each account. Run it again in the same `--out` folder after you fix something: it skips the accounts it already created. `--force` ignores the earlier result, which can create connections twice.
+Key-based apps match by field name. Basic auth goes in as `api_key` with `username` and `password`. OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` writes the result after each account: a connection id, or Elaichi's error `code` (and `field`, for a field problem). It stops at once on 401, 403, 428, or 503 `connection_import_unavailable` (Elaichi's import is not live yet). Run it again in the same `--out` folder after you fix something: it skips the accounts it already created. `--force` ignores the earlier result, which can create connections twice.
 
 ## What maps to what
 

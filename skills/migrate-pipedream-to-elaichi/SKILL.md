@@ -111,6 +111,7 @@ The export holds no credentials, so each app in `reconnect` needs an account in 
    | `status` | What to do |
    |---|---|
    | `importable` | Ready for `--apply`. |
+   | `org_oauth_app_unknown` | Your token may not read the OAuth app. `--apply` sends it anyway; handle `org_oauth_app_required` if it comes back. |
    | `org_oauth_app_needed` | Tell the person: in Elaichi, set the same OAuth client (the one their Pipedream account used) as the organization's own OAuth app for that connector. Then run the dry run again. |
    | `needs_mapping` | Compare `pipedream_keys` with `elaichi_fields`. Write a `--map` file: `{ "<pipedream app>": { "connector": "<slug>", "authentication_method": "<method>", "fields": { "<pipedream key>": "<elaichi field>" } } }`. Ask the person if the match is not clear. |
    | `no_connector` | If Elaichi has the app under another slug, map it: `{ "<pipedream app>": "<slug>" }`. Otherwise it is a reconnect. |
@@ -122,7 +123,7 @@ The export holds no credentials, so each app in `reconnect` needs an account in 
    npx -y github:trutohq/pipedream-to-elaichi connections --apply [--map map.json]
    ```
 
-   It posts one account at a time and writes `elaichi-connections/connections-result.json` (a connection id or an `error_code` per account). Run it again in the same folder after a fix (for example after the person sets the OAuth app): it skips the accounts it already created. Never add `--force`: that can create connections twice. Error codes: `org_oauth_app_required` (as `org_oauth_app_needed` above), `credential_test_failed` (the app refused the credentials: reconnect), `invalid_credentials` (fix the `--map` entry for the named `field`).
+   It posts one account at a time and writes `elaichi-connections/connections-result.json` (a connection id or an `error_code` per account). Run it again in the same folder after a fix (for example after the person sets the OAuth app): it skips the accounts it already created. Never add `--force`: that can create connections twice. Error codes: `org_oauth_app_required` (as `org_oauth_app_needed` above), `credential_test_failed` (the app refused the credentials: reconnect), `invalid_credentials`, `missing_required_field`, `invalid_field` or `transform_failed` (fix the `--map` entry for the named `field`), `unsupported_authentication_method` (pick another method in `--map`), `integration_not_installed` (the connector is not set up in the organization). The run stops on `connection_import_unavailable` (Elaichi's import is not live yet: try later), `step_up_required` (should not happen with a token: report it), 401 and 403.
 4. Tell the person to delete any accounts file when you are done.
 
 ## When something does not fit
