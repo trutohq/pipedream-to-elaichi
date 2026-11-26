@@ -11,8 +11,9 @@ Follow [skills/migrate-pipedream-to-elaichi/SKILL.md](skills/migrate-pipedream-t
 3. Edit the drafts, then `bun src/cli.ts check elaichi-drafts` until it passes.
 4. Validate with the person's Elaichi MCP server (`elaichi__automation__draft__validate` with no `id`; it saves nothing). With no MCP connection: `bun src/cli.ts validate elaichi-drafts` with `ELAICHI_API_TOKEN` set.
 5. Ask the person before creating drafts (`elaichi__automation__draft__create`, or `bun src/cli.ts push elaichi-drafts`) and before a dry run.
+6. Connected accounts: `bun src/cli.ts connections` (dry run) lists which accounts can move with their credentials and which need a reconnect. It needs `ELAICHI_API_TOKEN`, plus `PIPEDREAM_CLIENT_ID` and `PIPEDREAM_CLIENT_SECRET` (or `PIPEDREAM_API_KEY` and `PIPEDREAM_ORG_ID`), or `--accounts-file <path>`. Read `elaichi-connections/connections-plan.json`. Ask the person before `--apply`: it creates connections.
 
-Hard rules: never publish or enable a workflow. Never print, log or write a token. Never invent a redacted secret. Never run the convert command with `--push` for the person: it creates drafts nobody has reviewed.
+Hard rules: never publish or enable a workflow. Never print, log or write a token or a credential. Never open, read or `cat` a Pipedream accounts file: it holds live secrets, and reading it puts them in your transcript. Pass its path to `--accounts-file` only. Never invent a redacted secret. Never run the convert command with `--push` for the person: it creates drafts nobody has reviewed.
 
 ## If you are changing this repository
 
@@ -23,3 +24,4 @@ Hard rules: never publish or enable a workflow. Never print, log or write a toke
 - `src/catalog.ts` maps Pipedream actions to Elaichi tools. Add an `args` mapper only when both sides' field names were checked, and list the props it reads in `argProps`.
 - What is and is not confirmed about the export format is in [FORMAT.md](FORMAT.md). Update it when a real export settles a point.
 - `--push` and `push` only call `POST /automation`. Never add a call to publish or enable.
+- `connections` only reads Pipedream and calls `GET /connector/…` and `POST /connection`. No credential value may reach a log line, a file or an error message. `test/connections.test.ts` checks that with a sentinel secret: keep it passing, and extend it for every new output.

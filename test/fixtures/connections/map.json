@@ -1,0 +1,3 @@
+{
+  "acme_crm": { "connector": "acme-crm", "authentication_method": "api_key", "fields": { "token": "api_token", "subdomain": "domain" } }
+}

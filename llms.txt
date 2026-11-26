@@ -2,7 +2,7 @@
 
 > Convert Pipedream workflow exports (project_export-*.zip) into Elaichi workflow drafts, then let an AI coding agent finish the migration. Pipedream Workflows shuts down on 31 March 2027. The CLI is deterministic and never publishes or turns a workflow on; open work is listed in migration-plan.json for the agent.
 
-Run it with Bun installed: `npx -y github:trutohq/pipedream-to-elaichi <export.zip> --out elaichi-drafts`. Then `check`, `validate` and `push` subcommands work on the drafts folder. Agents should follow the skill below.
+Run it with Bun installed: `npx -y github:trutohq/pipedream-to-elaichi <export.zip> --out elaichi-drafts`. Then `check`, `validate` and `push` subcommands work on the drafts folder. The `connections` subcommand moves Pipedream connected accounts to Elaichi connections where Pipedream's API returns their credentials (dry run by default, `--apply` to create), and lists the accounts to connect again. Agents should follow the skill below.
 
 ## Agent playbook
 
@@ -13,6 +13,6 @@ Run it with Bun installed: `npx -y github:trutohq/pipedream-to-elaichi <export.z
 
 ## Reference
 
-- [README](https://raw.githubusercontent.com/trutohq/pipedream-to-elaichi/main/README.md): what maps to what, commands and options
+- [README](https://raw.githubusercontent.com/trutohq/pipedream-to-elaichi/main/README.md): what maps to what, commands and options, moving connected accounts
 - [FORMAT.md](https://raw.githubusercontent.com/trutohq/pipedream-to-elaichi/main/FORMAT.md): what is confirmed and what is not about Pipedream's export format
 - [Limits](https://raw.githubusercontent.com/trutohq/pipedream-to-elaichi/main/src/limits.ts): Elaichi limits a Pipedream workflow can hit, with what to do instead

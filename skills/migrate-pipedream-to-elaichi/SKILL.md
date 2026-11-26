@@ -1,6 +1,6 @@
 ---
 name: migrate-pipedream-to-elaichi
-description: Move Pipedream workflows to Elaichi. Use when the user has a Pipedream project export (project_export-*.zip, an unzipped export folder, or a workflow .json) and wants Elaichi workflow drafts — converts it, then works through every TODO (toolboxes, tool arguments, porting Python/Go/Bash code to JavaScript, rebuilding HTTP calls as tool calls) until the drafts validate. Never publishes or turns a workflow on.
+description: Move Pipedream workflows to Elaichi. Use when the user has a Pipedream project export (project_export-*.zip, an unzipped export folder, or a workflow .json) and wants Elaichi workflow drafts — converts it, then works through every TODO (toolboxes, tool arguments, porting Python/Go/Bash code to JavaScript, rebuilding HTTP calls as tool calls) until the drafts validate, and moves connected accounts to Elaichi where Pipedream returns their credentials. Never publishes or turns a workflow on.
 license: MIT
 compatibility: Needs Bun (https://bun.sh) and Node's npx, or a clone of github.com/trutohq/pipedream-to-elaichi. The Elaichi MCP server or an Elaichi API token is needed to validate and create drafts.
 metadata:
@@ -18,7 +18,8 @@ Pipedream Workflows shuts down on 31 March 2027 and deletes all Workflows data b
 - **Never guess a secret.** Pipedream exports secrets as `<redacted>`. Ask the person, or leave the TODO.
 - **Never mark work done that you did not check.** A step is done when `check` no longer lists it and the validator shows no error for it.
 - **Keep the person's data private.** The export can hold customer data in props. Do not paste it into anything outside this session.
-- **Never print or write a token.** If an Elaichi API token is used, it stays in the `ELAICHI_API_TOKEN` environment variable. Do not echo it, log it, or put it in a file.
+- **Never print or write a token or a credential.** If an Elaichi API token is used, it stays in the `ELAICHI_API_TOKEN` environment variable. Do not echo it, log it, or put it in a file. The same goes for Pipedream credentials (`PIPEDREAM_*`).
+- **Never open a Pipedream accounts file.** A saved list-accounts answer holds live secrets. Do not `cat`, read or search it: that puts the secrets in your transcript. Only pass its path to `--accounts-file`.
 - **Prefer the person's Elaichi MCP server** (tools named `elaichi__automation__…`) for validating, creating and dry-running drafts. It acts as them, with their permissions. Use an API token only when they have no MCP connection.
 
 ## 1. Convert
@@ -92,7 +93,37 @@ Elaichi step and expression shapes: [references/elaichi.md](references/elaichi.m
 
 5. With MCP, offer `automation.dry_run` on each draft and run it once the person agrees: it reads from their real apps, and writes are only recorded. Use it to check the real shape of each tool's `result` and fix expressions.
 
-6. Finish with: what was created (ids), what is still open, and the person's last steps: connect each app in `reconnect`, enter the secrets, update webhook senders, test-run, publish, turn on.
+6. Move connected accounts (section 5), then finish with: what was created (ids), what is still open, and the person's last steps: connect each app still listed to reconnect, enter the secrets, update webhook senders, test-run, publish, turn on.
+
+## 5. Move connected accounts
+
+The export holds no credentials, so each app in `reconnect` needs an account in Elaichi. Pipedream's API returns credentials for some accounts (OAuth accounts on the person's own OAuth client, and some key-based apps). The `connections` command moves those and lists the rest.
+
+1. Ask the person for one of these, set in the environment (never in a file or on the command line you print): `PIPEDREAM_CLIENT_ID` and `PIPEDREAM_CLIENT_SECRET` (an OAuth client from https://pipedream.com/settings/api), or `PIPEDREAM_API_KEY` and `PIPEDREAM_ORG_ID`. Or a saved accounts file: pass it with `--accounts-file`, and do not open it. It also needs `ELAICHI_API_TOKEN`.
+2. Dry run. It reads only, and creates nothing:
+
+   ```bash
+   npx -y github:trutohq/pipedream-to-elaichi connections --json
+   ```
+
+   Read `elaichi-connections/connections-plan.json`. It holds key names only, never values. Each account has a `status`:
+
+   | `status` | What to do |
+   |---|---|
+   | `importable` | Ready for `--apply`. |
+   | `org_oauth_app_needed` | Tell the person: in Elaichi, set the same OAuth client (the one their Pipedream account used) as the organization's own OAuth app for that connector. Then run the dry run again. |
+   | `needs_mapping` | Compare `pipedream_keys` with `elaichi_fields`. Write a `--map` file: `{ "<pipedream app>": { "connector": "<slug>", "authentication_method": "<method>", "fields": { "<pipedream key>": "<elaichi field>" } } }`. Ask the person if the match is not clear. |
+   | `no_connector` | If Elaichi has the app under another slug, map it: `{ "<pipedream app>": "<slug>" }`. Otherwise it is a reconnect. |
+   | `reconnect` | The person connects it again in Elaichi. |
+
+3. Show the person the table. **Ask before `--apply`**: it creates connections in their organization.
+
+   ```bash
+   npx -y github:trutohq/pipedream-to-elaichi connections --apply [--map map.json]
+   ```
+
+   It posts one account at a time and writes `elaichi-connections/connections-result.json` (a connection id or an `error_code` per account). It refuses to run twice in the same folder, because that would create the same connections twice. Error codes: `org_oauth_app_required` (as `org_oauth_app_needed` above), `credential_test_failed` (the app refused the credentials: reconnect), `invalid_credentials` (fix the `--map` entry for the named `field`).
+4. Tell the person to delete any accounts file when you are done.
 
 ## When something does not fit
 

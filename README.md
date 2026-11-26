@@ -87,9 +87,48 @@ ELAICHI_API_TOKEN=elch_... npx -y github:trutohq/pipedream-to-elaichi push ./ela
 
 Then, for each draft in Elaichi:
 
-1. Connect each app again. Pipedream exports no credentials.
+1. Bring each app's account over: [move it](#move-connected-accounts) with `connections`, or connect it again in Elaichi. The export holds no credentials.
 2. Fix each TODO step, then delete the first step, "TODO: review this import, then delete this step". That step fails every run on purpose until you delete it.
 3. Validate the draft, test-run it, publish it, then turn it on.
+
+### Move connected accounts
+
+The export holds no credentials. But Pipedream's API returns them for some accounts, and Elaichi can create a connection from them. Then you do not connect those apps again.
+
+```bash
+# Dry run: reads your accounts, prints a table, writes elaichi-connections/connections-plan.json. Creates nothing.
+PIPEDREAM_CLIENT_ID=… PIPEDREAM_CLIENT_SECRET=… ELAICHI_API_TOKEN=elch_… \
+  npx -y github:trutohq/pipedream-to-elaichi connections
+
+# Create the importable connections, one at a time. Writes elaichi-connections/connections-result.json.
+… npx -y github:trutohq/pipedream-to-elaichi connections --apply
+```
+
+Where the accounts come from:
+
+- Live: `GET https://api.pipedream.com/v1/accounts?include_credentials=true`, every page. Set `PIPEDREAM_CLIENT_ID` and `PIPEDREAM_CLIENT_SECRET` (an OAuth client from your workspace's [API settings](https://pipedream.com/settings/api)). Or set `PIPEDREAM_API_KEY` and `PIPEDREAM_ORG_ID` (your workspace id, `o_…`).
+- A file: `--accounts-file accounts.json`, a saved answer from that call (one `{ "data": [...] }`, an array of those pages, or an array of accounts). A Pipedream Connect `GET /v1/connect/{project_id}/accounts` answer works too. **A file with credentials holds live secrets.** Keep it private and delete it when you are done.
+
+What each status means:
+
+| Status | Meaning | What to do |
+|---|---|---|
+| importable | Credentials are present and fit an Elaichi auth method. | `--apply` creates the connection. |
+| org OAuth app needed | An OAuth token. Pipedream returns those only for accounts on your own OAuth client, and Elaichi needs that same client. | In Elaichi, set that client as the organization's own OAuth app for the connector. Run again. |
+| needs mapping | Credentials are present, but their key names do not match the connector's fields. | Add a `--map` entry. The plan lists both key lists (names only). |
+| no connector | No Elaichi connector matched the app's slug. | Add a `--map` entry if Elaichi has it under another slug. |
+| reconnect | Pipedream returned no credentials, or the account is dead. | Connect it again in Elaichi. |
+
+`--map map.json` overrides the match:
+
+```json
+{
+  "google_sheets": "googlesheets",
+  "acme_crm": { "connector": "acme-crm", "authentication_method": "api_key", "fields": { "token": "api_token" } }
+}
+```
+
+OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` refuses to run twice in one `--out` folder (that would create the same connections twice) unless you add `--force`.
 
 ## What maps to what
 
