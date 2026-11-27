@@ -478,8 +478,9 @@ export async function applyConnections(
       continue
     }
     // A coded 500 internal_error is Elaichi's own answer: it has already cleaned up, so it is a plain failure.
-    // provider_unavailable (502/503): the app did not answer, Elaichi cleaned up first. A plain failure a re-run may resend.
-    if (r.status >= 500 && r.status !== 503 && r.code !== 'provider_unavailable' && !(r.status === 500 && r.code === 'internal_error')) {
+    // provider_unavailable / credential_test_incomplete (502/503): the check could not finish, and nothing was kept.
+    // A plain failure a re-run may resend.
+    if (r.status >= 500 && r.status !== 503 && !RETRYABLE.includes(r.code ?? '') && !(r.status === 500 && r.code === 'internal_error')) {
       push({ ...base, ok: false, error_code: 'unknown_outcome', error: brief(r) })
       continue
     }
@@ -499,7 +500,9 @@ export async function applyConnections(
  * A 403 `forbidden` about one connector ("restricted for your account") is that account's failure only.
  */
 const STOP_STATUSES = [401, 428, 503]
-const stopsRun = (r: ApiResponse) => (STOP_STATUSES.includes(r.status) && r.code !== 'provider_unavailable') || (r.status === 403 && (r.code === 'permission_required' || r.code === 'staff_import_refused'))
+/** One app's check could not finish and nothing was kept: that account fails, the run goes on. */
+const RETRYABLE = ['provider_unavailable', 'credential_test_incomplete']
+const stopsRun = (r: ApiResponse) => (STOP_STATUSES.includes(r.status) && !RETRYABLE.includes(r.code ?? '')) || (r.status === 403 && (r.code === 'permission_required' || r.code === 'staff_import_refused'))
 
 /** What to do next for an apply error code. */
 export function errorHelp(code: string | undefined): string {
@@ -529,6 +532,8 @@ export function errorHelp(code: string | undefined): string {
       return 'Elaichi has paused connection changes for the whole platform. Nothing more was sent. Run --apply again later.'
     case 'http_503':
       return 'Elaichi is unavailable. Nothing more was sent. Run --apply again later.'
+    case 'credential_test_incomplete':
+      return 'Elaichi could not finish checking the credentials, and nothing was kept. Run --apply again later.'
     case 'provider_unavailable':
       return 'The app\'s server did not answer, and nothing was kept. Run --apply again later.'
     case 'internal_error':

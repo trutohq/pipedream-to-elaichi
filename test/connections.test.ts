@@ -595,6 +595,13 @@ describe('review fixes', () => {
     expect(readJson<ConnResult[]>(join(bad.dir, 'connections-result.json')).every(x => x.error_code === 'provider_unavailable')).toBe(true)
   })
 
+  test('credential_test_incomplete is a plain failure that does not stop the run', async () => {
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi((b, n) => (b.connector_slug === 'slack' ? json({ error: { code: 'credential_test_incomplete', message: 'x' } }, 503) : created(`conn_${n}`))))
+    const res = readJson<ConnResult[]>(join(r.dir, 'connections-result.json'))
+    expect(res.map(x => x.error_code ?? 'ok')).toEqual(['credential_test_incomplete', 'ok', 'ok', 'ok'])
+    expect(r.out.join('\n')).toContain('could not finish checking')
+  })
+
   test('3b a --map oauth2 override on a key-based account runs the org OAuth app check', async () => {
     const dir = outDir()
     const map = join(dir, 'm.json')
