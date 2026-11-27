@@ -190,7 +190,10 @@ export async function runConnections(
   else {
     for (const r of fresh)
       log(needsRepair(r) ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id}), but it needs repair. ${errorHelp('post_install_error')}` : r.ok ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id})${r.credential_tested === false ? ', credentials not tested by Elaichi' : ''}.` : `Failed ${r.pipedream_app} (${r.pipedream_account_id}): ${r.error_code ?? ''}${r.field ? ` (field ${r.field})` : ''} ${r.error ?? ''} ${errorHelp(r.error_code)}`.replace(/\s+/g, ' ').trim())
+    const older = results.filter(r => needsRepair(r) && !fresh.includes(r))
+    if (older.length > 0) log(`Needs repair (created earlier, post-install failed): ${older.map(r => r.connection_id ?? r.pipedream_account_id).join(', ')}. ${errorHelp('post_install_error')}`)
     log(`Result: ${resultFile}`)
   }
-  return results.some(r => !r.ok || needsRepair(r)) ? 2 : 0
+  // Exit 2 for a failure, or a post_install_error this run produced. Older ones are listed above but do not fail a re-run.
+  return results.some(r => !r.ok) || fresh.some(needsRepair) ? 2 : 0
 }

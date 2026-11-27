@@ -495,13 +495,11 @@ export async function applyConnections(
 /**
  * Answers that make every later account fail the same way, so the run stops: 401 (token), 428 (step-up, which an
  * API token should never get), 503 (connection_import_unavailable, platform_connections_stopped, …) and a 403 that
- * is about the whole token: `permission_required`, or the staff refusal (code `forbidden`, message names staff).
+ * is about the whole token: `permission_required`, or `staff_import_refused`.
  * A 403 `forbidden` about one connector ("restricted for your account") is that account's failure only.
- * ponytail: the staff refusal is told apart by its message text, since Elaichi gives it the generic `forbidden` code;
- * ask Elaichi for a distinct code and match on it.
  */
 const STOP_STATUSES = [401, 428, 503]
-const stopsRun = (r: ApiResponse) => (STOP_STATUSES.includes(r.status) && r.code !== 'provider_unavailable') || (r.status === 403 && (r.code === 'permission_required' || /staff/i.test(r.message ?? '')))
+const stopsRun = (r: ApiResponse) => (STOP_STATUSES.includes(r.status) && r.code !== 'provider_unavailable') || (r.status === 403 && (r.code === 'permission_required' || r.code === 'staff_import_refused'))
 
 /** What to do next for an apply error code. */
 export function errorHelp(code: string | undefined): string {

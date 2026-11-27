@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { main } from '../src/cli.ts'
-import { accountsFromJson, applyConnections, candidateSlugs, type ConnPlan, type ConnResult, fetchPipedreamAccounts } from '../src/connections.ts'
+import { accountsFromJson, applyConnections, candidateSlugs, type ConnPlan, type ConnResult, fetchPipedreamAccounts, scrubber, scrubDeep } from '../src/connections.ts'
 
 const FIX = join(import.meta.dir, 'fixtures', 'connections')
 const ACCOUNTS = join(FIX, 'accounts.json')
@@ -501,7 +501,7 @@ describe('review fixes', () => {
     expect(existsSync(join(r.dir, 'connections-result.json'))).toBe(true)
   })
 
-  describe('7 Pipedream fetch', () => {
+  describe('7 Pipedream fetch: 429 retry, failed per-account GET', () => {
     test('retries once on 429, records a failed per-account GET, and warns at the page cap', async () => {
       let limited = true
       const f = (async (url: string) => {
@@ -527,7 +527,9 @@ describe('review fixes', () => {
     })
     test('warns on stderr when the 200-page cap is hit', async () => {
       let n = 0
-      const f = (async (url: string) => {
+      const elaichiApi = elaichi().f
+      const f = (async (url: string, init?: RequestInit) => {
+        if (!new URL(url).pathname.startsWith('/v1/')) return elaichiApi(url, init)
         if (new URL(url).pathname === '/v1/oauth/token') return json({ access_token: 'pd_access' })
         n++
         return json({ page_info: { end_cursor: `c${n}` }, data: [{ id: `apn_${n}`, app: { name: 'Slack' }, credentials: { oauth_access_token: 'SENTINEL_SECRET_p' } }] })
@@ -535,6 +537,9 @@ describe('review fixes', () => {
       const warnings: string[] = []
       await fetchPipedreamAccounts({ PIPEDREAM_CLIENT_ID: 'id', PIPEDREAM_CLIENT_SECRET: 's' }, f, { warn: s => warnings.push(s) })
       expect(warnings.join('')).toContain('200 pages')
+      const err: string[] = []
+      await main(['connections', '--out', outDir()], { ...ENV, PIPEDREAM_CLIENT_ID: 'id', PIPEDREAM_CLIENT_SECRET: 's' }, () => {}, f, s => err.push(s))
+      expect(err.join('\n')).toContain('Warning: stopped after 200 pages')
     })
   })
 
@@ -588,5 +593,37 @@ describe('review fixes', () => {
     expect(r.out.join('\n')).not.toContain('cannot import connections yet')
     const bad = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(errOnAll(502, { code: 'provider_unavailable', message: 'x' })))
     expect(readJson<ConnResult[]>(join(bad.dir, 'connections-result.json')).every(x => x.error_code === 'provider_unavailable')).toBe(true)
+  })
+
+  test('3b a --map oauth2 override on a key-based account runs the org OAuth app check', async () => {
+    const dir = outDir()
+    const map = join(dir, 'm.json')
+    writeFileSync(map, JSON.stringify({ acme_crm: { connector: 'acme-crm', authentication_method: 'oauth2', fields: { token: 'access_token' } } }))
+    const api = elaichi(undefined, { ...ORG_OAUTH_APPS, 'acme-crm': { oauth_app_mode: 'platform_default' } }, { ...CONNECTORS, 'acme-crm': { slug: 'acme-crm', auth_formats: ['oauth2'], auth_fields: { oauth2: oauth2Fields } } })
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', map], api)
+    expect(byId(readJson<ConnPlan>(join(r.dir, 'connections-plan.json'))).apn_acme1?.status).toBe('org_oauth_app_needed')
+  })
+
+  test('staff_import_refused stops the run; an old post_install_error does not make a re-run exit 2', async () => {
+    const stopped = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(errOnAll(403, { code: 'staff_import_refused', message: 'No.' })))
+    expect(readJson<ConnResult[]>(join(stopped.dir, 'connections-result.json')).map(x => x.error_code)).toEqual(['staff_import_refused', 'skipped', 'skipped', 'skipped'])
+    const dir = outDir()
+    const post: Post = (b, n) => json({ connection: { id: `conn_${n}`, status: b.connector_slug === 'sendgrid' ? 'post_install_error' : 'active' } }, 201)
+    const args = ['connections', '--accounts-file', ACCOUNTS, '--map', MAP, '--out', dir, '--apply']
+    expect(await main(args, ENV, () => {}, elaichi(post).f, () => {})).toBe(2)
+    const out: string[] = []
+    expect(await main(args, ENV, s => out.push(s), elaichi(post).f, () => {})).toBe(0)
+    expect(out.join('\n')).toContain('Needs repair')
+  })
+
+  test('scrubDeep blanks a secret in a nested object, an array and a key, and leaves other types alone', () => {
+    const clean = scrubDeep(scrubber(['SECRET_VALUE']))
+    expect(clean({ a: { b: 'x SECRET_VALUE y' }, list: ['SECRET_VALUE', 1, true, null, ['SECRET_VALUE']], SECRET_VALUE: 'k', ok: false, n: 3 })).toEqual({
+      a: { b: 'x [redacted] y' },
+      list: ['[redacted]', 1, true, null, ['[redacted]']],
+      '[redacted]': 'k',
+      ok: false,
+      n: 3,
+    })
   })
 })
