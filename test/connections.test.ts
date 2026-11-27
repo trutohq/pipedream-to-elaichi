@@ -97,7 +97,7 @@ describe('connections dry run', () => {
     expect(a.apn_acme1).toMatchObject({ status: 'needs_mapping', connector_slug: 'acme-crm', pipedream_keys: ['subdomain', 'token'], elaichi_fields: { api_key: ['api_token', 'domain'] } })
     expect(a.apn_trello1?.status).toBe('no_connector')
     expect(a.apn_basic1).toMatchObject({ status: 'importable', connector_slug: 'acme-billing', authentication_method: 'api_key', fields: ['password', 'username'] })
-    expect(plan.summary).toEqual({ importable: 3, org_oauth_app_unknown: 0, org_oauth_app_needed: 1, needs_mapping: 1, no_connector: 1, reconnect: 2 })
+    expect(plan.summary).toEqual({ importable: 3, org_oauth_app_unknown: 0, org_oauth_app_needed: 1, needs_mapping: 1, no_connector: 1, restricted: 0, reconnect: 2 })
     expect(lines.join('\n')).toContain('| slack | Slack — acme | slack | importable |')
     expect(lines.join('\n')).toContain('Dry run: nothing was created')
     expect(existsSync(join(out, 'connections-result.json'))).toBe(false)
@@ -145,8 +145,8 @@ describe('connections dry run', () => {
   test('reads one page, an array of pages, or an array of accounts', () => {
     const acc = { id: 'apn_1', app: { name: 'Slack' } }
     expect(accountsFromJson({ data: [acc] })).toHaveLength(1)
-    expect(accountsFromJson([{ data: [acc] }, { data: [acc, acc] }])).toHaveLength(3)
-    expect(accountsFromJson([acc, acc])).toHaveLength(2)
+    expect(accountsFromJson([{ data: [acc] }, { data: [{ ...acc, id: 'apn_2' }, { ...acc, id: 'apn_3' }] }])).toHaveLength(3)
+    expect(accountsFromJson([acc, { ...acc, id: 'apn_2' }])).toHaveLength(2)
     expect(() => accountsFromJson({ accounts: [] })).toThrow()
   })
   test('needs an Elaichi token, and refuses a positional argument', async () => {
@@ -285,7 +285,7 @@ describe('connections --apply', () => {
   test('a network error or a 5xx is an unknown outcome: not sent again until --retry-unknown', async () => {
     const out = outDir()
     const first = elaichi((b, n) => {
-      if (b.connector_slug === 'sendgrid') return json({ error: { code: 'internal_error', message: 'Boom' } }, 500)
+      if (b.connector_slug === 'sendgrid') return json({ error: { code: 'bad_gateway', message: 'Boom' } }, 502)
       if (b.connector_slug === 'acme-billing') throw new Error('socket hang up')
       return created(`conn_${n}`)
     })
@@ -427,5 +427,166 @@ describe('the convert flow points at the connections command', () => {
     expect(readFileSync(join(out, 'report.md'), 'utf8')).toContain('Run `pipedream-to-elaichi connections`')
     expect(readJson<{ connections: string }>(join(out, 'migration-plan.json')).connections).toContain('pipedream-to-elaichi connections')
     expect(lines.join('\n')).toContain('pipedream-to-elaichi connections')
+  })
+})
+
+const errOnAll = (status: number, error: Record<string, unknown>): Post => () => json({ error }, status)
+
+describe('review fixes', () => {
+  const run = async (args: string[], api = elaichi(), env: Record<string, string | undefined> = ENV) => {
+    const out: string[] = []
+    const err: string[] = []
+    const outDirPath = outDir()
+    const code = await main(['connections', ...args, '--out', outDirPath], env, s => out.push(s), api.f, s => err.push(s))
+    return { code, out, err, dir: outDirPath, api }
+  }
+  const posted = (api: ReturnType<typeof elaichi>) => api.posts().map(c => JSON.parse(c.body as string).connector_slug)
+
+  test('1 --json prints valid JSON only on stdout; the rest goes to stderr', async () => {
+    const dry = await run(['--accounts-file', ACCOUNTS, '--json'])
+    expect(dry.out).toHaveLength(1)
+    expect(() => JSON.parse(dry.out[0] as string)).not.toThrow()
+    expect(dry.err.join('\n')).toContain('Warning')
+    const apply = await run(['--accounts-file', ACCOUNTS, '--json', '--apply'])
+    expect(apply.out).toHaveLength(1)
+    expect(JSON.parse(apply.out[0] as string).ok).toBe(true)
+    expect(apply.err.join('\n')).toContain('| Pipedream app |')
+  })
+
+  test('2 a restricted connector is its own status, and a per-connector 403 fails only that account', async () => {
+    const api = elaichi(undefined, ORG_OAUTH_APPS, { ...CONNECTORS, sendgrid: { ...(CONNECTORS.sendgrid as object), restricted: true } })
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], api)
+    expect(byId(readJson<ConnPlan>(join(r.dir, 'connections-plan.json'))).apn_sendgrid1?.status).toBe('restricted')
+    expect(posted(api)).not.toContain('sendgrid')
+    const only = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi((b, n) => (b.connector_slug === 'slack' ? json({ error: { code: 'forbidden', message: 'This connector is restricted for your account' } }, 403) : created(`conn_${n}`))))
+    const res = readJson<ConnResult[]>(join(only.dir, 'connections-result.json'))
+    expect(res.map(x => x.ok)).toEqual([false, true, true, true])
+    const whole = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(() => json({ error: { code: 'permission_required', message: 'Need connection:create' } }, 403)))
+    expect(readJson<ConnResult[]>(join(whole.dir, 'connections-result.json')).map(x => x.error_code)).toEqual(['permission_required', 'skipped', 'skipped', 'skipped'])
+  })
+
+  test('3 the scrubber works on values, so a secret like "false" never damages the JSON', async () => {
+    const dir = outDir()
+    const file = join(dir, 'acc.json')
+    writeFileSync(file, JSON.stringify({ data: [{ id: 'apn_f', name: 'SendGrid', app: { name_slug: 'sendgrid' }, credentials: { api_key: 'false' } }] }))
+    const api = elaichi(() => json({ error: { code: 'credential_test_failed', message: 'refused false' } }, 422))
+    await main(['connections', '--accounts-file', file, '--out', dir, '--apply'], ENV, () => {}, api.f, () => {})
+    const [r] = readJson<ConnResult[]>(join(dir, 'connections-result.json'))
+    expect(r?.ok).toBe(false)
+    expect(r?.error).toContain('[redacted]')
+    expect(readFileSync(join(dir, 'connections-result.json'), 'utf8')).not.toMatch(/"ok": \[redacted\]/)
+  })
+
+  test('4 a repeated account id is sent once', async () => {
+    const dir = outDir()
+    const file = join(dir, 'acc.json')
+    const acc = { id: 'apn_d', name: 'SendGrid', app: { name_slug: 'sendgrid' }, credentials: { api_key: 'SENTINEL_SECRET_d' } }
+    writeFileSync(file, JSON.stringify([{ data: [acc] }, { data: [acc] }]))
+    const api = elaichi()
+    await main(['connections', '--accounts-file', file, '--out', dir, '--apply'], ENV, () => {}, api.f, () => {})
+    expect(posted(api)).toEqual(['sendgrid'])
+  })
+
+  test('5 --map fields accept Pipedream\'s own OAuth key names', async () => {
+    const dir = outDir()
+    const map = join(dir, 'm.json')
+    writeFileSync(map, JSON.stringify({ slack: { connector: 'slack', fields: { oauth_access_token: 'access_token', oauth_refresh_token: 'refresh_token' } } }))
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', map])
+    expect(byId(readJson<ConnPlan>(join(r.dir, 'connections-plan.json'))).apn_slack1).toMatchObject({ status: 'importable', fields: expect.arrayContaining(['access_token', 'refresh_token']) })
+  })
+
+  test('6 the result file is written by rename: no temp file is left', async () => {
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'])
+    expect(readdirSync(r.dir).filter(f => f.endsWith('.tmp'))).toEqual([])
+    expect(existsSync(join(r.dir, 'connections-result.json'))).toBe(true)
+  })
+
+  describe('7 Pipedream fetch', () => {
+    test('retries once on 429, records a failed per-account GET, and warns at the page cap', async () => {
+      let limited = true
+      const f = (async (url: string) => {
+        const u = new URL(url)
+        if (u.pathname === '/v1/oauth/token') return json({ access_token: 'pd_access' })
+        if (u.pathname === '/v1/accounts' && limited) {
+          limited = false
+          return json({}, 429, { 'Retry-After': '1' })
+        }
+        if (u.pathname === '/v1/accounts') return json({ page_info: { end_cursor: null }, data: [{ id: 'apn_x', app: { name: 'Slack' } }] })
+        return json({ error: 'nope' }, 404)
+      }) as unknown as typeof fetch
+      const waits: number[] = []
+      const accounts = await fetchPipedreamAccounts({ PIPEDREAM_CLIENT_ID: 'id', PIPEDREAM_CLIENT_SECRET: 's' }, f, { sleep: async ms => void waits.push(ms) })
+      expect(waits).toEqual([1000])
+      expect(accounts[0]).toMatchObject({ id: 'apn_x', fetch_error: 'Pipedream answered 404 on GET /accounts/apn_x.' })
+      const out = outDir()
+      const file = join(out, 'a.json')
+      writeFileSync(file, JSON.stringify({ data: accounts }))
+      await main(['connections', '--accounts-file', file, '--out', out], ENV, () => {}, elaichi().f, () => {})
+      const item = readJson<ConnPlan>(join(out, 'connections-plan.json')).accounts[0]
+      expect(item).toMatchObject({ pipedream_account_id: 'apn_x', status: 'reconnect' })
+    })
+    test('warns on stderr when the 200-page cap is hit', async () => {
+      let n = 0
+      const f = (async (url: string) => {
+        if (new URL(url).pathname === '/v1/oauth/token') return json({ access_token: 'pd_access' })
+        n++
+        return json({ page_info: { end_cursor: `c${n}` }, data: [{ id: `apn_${n}`, app: { name: 'Slack' }, credentials: { oauth_access_token: 'SENTINEL_SECRET_p' } }] })
+      }) as unknown as typeof fetch
+      const warnings: string[] = []
+      await fetchPipedreamAccounts({ PIPEDREAM_CLIENT_ID: 'id', PIPEDREAM_CLIENT_SECRET: 's' }, f, { warn: s => warnings.push(s) })
+      expect(warnings.join('')).toContain('200 pages')
+    })
+  })
+
+  describe('8 error help', () => {
+    test('validation_error shows the field', async () => {
+      const r = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(errOnAll(400, { code: 'validation_error', message: 'Bad key.', details: { field: 'credentials.values.x' } })))
+      expect(r.out.join('\n')).toContain('(field credentials.values.x)')
+      expect(r.out.join('\n')).toContain('Fix the --map entry')
+    })
+    test('a coded 500 internal_error is a plain failure, not unknown_outcome', async () => {
+      const r = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(errOnAll(500, { code: 'internal_error', message: 'Boom' })))
+      expect(readJson<ConnResult[]>(join(r.dir, 'connections-result.json')).every(x => x.error_code === 'internal_error')).toBe(true)
+    })
+    test('a 404 on the oauth-app read is worded apart from connector:manage', async () => {
+      const r = await run(['--accounts-file', ACCOUNTS], elaichi(undefined, { ...ORG_OAUTH_APPS, slack: undefined }))
+      const reason = byId(readJson<ConnPlan>(join(r.dir, 'connections-plan.json'))).apn_slack1?.reasons.join(' ')
+      expect(reason).toContain('no organization OAuth app to read')
+      expect(reason).not.toContain('connector:manage')
+    })
+    test('503 platform_connections_stopped stops the run with its own text; another 503 says unavailable', async () => {
+      const a = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(errOnAll(503, { code: 'platform_connections_stopped', message: 'Paused.' })))
+      expect(a.out.join('\n')).toContain('paused connection changes')
+      expect(a.out.join('\n')).not.toContain('cannot import connections yet')
+      const b = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(errOnAll(503, { message: 'Down.' })))
+      expect(b.out.join('\n')).toContain('Elaichi is unavailable')
+    })
+  })
+
+  test('9 --map oauth2 works for a key-based account whose fields map to access_token', async () => {
+    const dir = outDir()
+    const map = join(dir, 'm.json')
+    writeFileSync(map, JSON.stringify({ acme_crm: { connector: 'acme-crm', authentication_method: 'oauth2', fields: { token: 'access_token' } } }))
+    const api = elaichi(undefined, { ...ORG_OAUTH_APPS, 'acme-crm': { oauth_app_mode: 'byoa', client_id: 'c' } }, { ...CONNECTORS, 'acme-crm': { slug: 'acme-crm', auth_formats: ['oauth2'], auth_fields: { oauth2: oauth2Fields } } })
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', map], api)
+    expect(byId(readJson<ConnPlan>(join(r.dir, 'connections-plan.json'))).apn_acme1).toMatchObject({ status: 'importable', authentication_method: 'oauth2', fields: ['access_token'] })
+  })
+
+  test('10 a 201 with post_install_error is created but needs repair', async () => {
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi((b, n) => (b.connector_slug === 'sendgrid' ? json({ connection: { id: `conn_${n}`, status: 'post_install_error' } }, 201) : created(`conn_${n}`))))
+    expect(r.code).toBe(2)
+    const x = readJson<ConnResult[]>(join(r.dir, 'connections-result.json')).find(y => y.connector_slug === 'sendgrid')
+    expect(x).toMatchObject({ ok: true, status: 'post_install_error', error_code: 'post_install_error' })
+    expect(r.out.join('\n')).toContain('run-post-install')
+  })
+
+  test('provider_unavailable is a plain failure that does not stop the run, and is not connection_import_unavailable', async () => {
+    const r = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi((b, n) => (b.connector_slug === 'slack' ? json({ error: { code: 'provider_unavailable', message: 'Slack is down.' } }, 503) : created(`conn_${n}`))))
+    const res = readJson<ConnResult[]>(join(r.dir, 'connections-result.json'))
+    expect(res.map(x => x.error_code ?? 'ok')).toEqual(['provider_unavailable', 'ok', 'ok', 'ok'])
+    expect(r.out.join('\n')).toContain('did not answer')
+    expect(r.out.join('\n')).not.toContain('cannot import connections yet')
+    const bad = await run(['--accounts-file', ACCOUNTS, '--map', MAP, '--apply'], elaichi(errOnAll(502, { code: 'provider_unavailable', message: 'x' })))
+    expect(readJson<ConnResult[]>(join(bad.dir, 'connections-result.json')).every(x => x.error_code === 'provider_unavailable')).toBe(true)
   })
 })

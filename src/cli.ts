@@ -111,7 +111,7 @@ export function parseArgs(argv: string[]): CliArgs {
   return args
 }
 
-export async function main(argv: string[], env: Record<string, string | undefined> = process.env, log = console.log, fetchFn: typeof fetch = fetch): Promise<number> {
+export async function main(argv: string[], env: Record<string, string | undefined> = process.env, log = console.log, fetchFn: typeof fetch = fetch, errLog: (s: string) => void = console.error): Promise<number> {
   let args: CliArgs
   try {
     args = parseArgs(argv)
@@ -124,7 +124,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
       log(`Error: connections takes no folder or file. Use --accounts-file <path>.\n\n${HELP}`)
       return 1
     }
-    return runConnections(args, env, log, fetchFn)
+    return runConnections(args, env, log, fetchFn, errLog)
   }
   if (args.help || !args.input) {
     log(HELP)

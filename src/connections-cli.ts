@@ -5,6 +5,7 @@ import {
   accountsFromJson,
   applyConnections,
   CONN_STATUSES,
+  dedupeAccounts,
   type ConnMap,
   type ConnResult,
   type ConnStatus,
@@ -14,6 +15,7 @@ import {
   type PdAccount,
   planConnections,
   scrubber,
+  scrubDeep,
   secretsOf,
   SENDABLE,
   UNKNOWN_OUTCOME,
@@ -26,6 +28,7 @@ const LABEL: Record<ConnStatus, string> = {
   org_oauth_app_needed: 'org OAuth app needed',
   org_oauth_app_unknown: 'org OAuth app unknown',
   no_connector: 'no connector',
+  restricted: 'restricted',
 }
 
 const cell = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
@@ -33,8 +36,16 @@ const cell = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
 /**
  * `connections`: dry run by default, `--apply` to create. Every line it prints and every file it writes goes through
  * a scrubber that blanks credential values, on top of the rule that values are never put in a message.
+ * With --json, `stdout` gets valid JSON only: every other line goes to `errLog` (stderr).
  */
-export async function runConnections(args: CliArgs, env: Record<string, string | undefined>, rawLog: (s: string) => void, fetchFn: typeof fetch): Promise<number> {
+export async function runConnections(
+  args: CliArgs,
+  env: Record<string, string | undefined>,
+  stdout: (s: string) => void,
+  fetchFn: typeof fetch,
+  errLog: (s: string) => void = console.error,
+): Promise<number> {
+  const rawLog = args.json ? errLog : stdout
   const token = env.ELAICHI_API_TOKEN
   if (!token) {
     rawLog('Error: connections needs ELAICHI_API_TOKEN (create one in Elaichi under Settings → API tokens).')
@@ -59,7 +70,8 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
       return 1
     }
   }
-  const envScrub = scrubber([token, env.PIPEDREAM_CLIENT_SECRET, env.PIPEDREAM_API_KEY].filter((s): s is string => !!s))
+  const pdSecrets = [env.PIPEDREAM_CLIENT_SECRET, env.PIPEDREAM_API_KEY].filter((s): s is string => !!s)
+  const envScrub = scrubber([token, ...pdSecrets])
 
   let map: ConnMap = {}
   if (args.map) {
@@ -94,16 +106,24 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
   } else {
     source = 'Pipedream API (GET /v1/accounts?include_credentials=true)'
     try {
-      accounts = await fetchPipedreamAccounts(env, fetchFn)
+      accounts = dedupeAccounts(await fetchPipedreamAccounts(env, fetchFn, { warn: errLog }))
     } catch (e) {
       rawLog(envScrub(`Error: cannot list Pipedream accounts: ${(e as Error).message}`))
       return 1
     }
   }
 
-  const scrub = scrubber([...secretsOf(accounts), token, ...[env.PIPEDREAM_CLIENT_SECRET, env.PIPEDREAM_API_KEY].filter((s): s is string => !!s)])
+  const scrub = scrubber([...secretsOf(accounts), token, ...pdSecrets])
   const log = (s: string) => rawLog(scrub(s))
-  const write = (file: string, data: unknown) => writeFileSync(join(out, file), scrub(`${JSON.stringify(data, null, 2)}\n`))
+  // Scrub the string values inside the object, then stringify: a regex over the JSON text could damage `"ok": false` or an id.
+  const clean = scrubDeep(scrub)
+  const json = (data: unknown) => `${JSON.stringify(clean(data), null, 2)}\n`
+  const write = (file: string, data: unknown) => {
+    // Temp file, then rename: a crash never leaves a half-written result file.
+    const tmp = join(out, `${file}.tmp`)
+    writeFileSync(tmp, json(data))
+    renameSync(tmp, join(out, file))
+  }
 
   if (accounts.length === 0) {
     log(`No connected accounts in ${source}.`)
@@ -125,7 +145,7 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
   mkdirSync(out, { recursive: true })
   write('connections-plan.json', plan)
 
-  if (args.json && !args.apply) log(JSON.stringify(plan, null, 2))
+  if (args.json && !args.apply) stdout(json(plan).trimEnd())
   else {
     log('| Pipedream app | Account | Elaichi connector | Status | Why |')
     log('|---|---|---|---|---|')
@@ -154,24 +174,23 @@ export async function runConnections(args: CliArgs, env: Record<string, string |
     skip.add(r.pipedream_account_id)
     log(`Not sent again: ${r.pipedream_app} (${r.pipedream_account_id}). An earlier --apply got no clear answer, so it may already exist. Check Elaichi for a ${r.connector_slug ?? r.pipedream_app} connection named "${r.connection_name ?? r.pipedream_account_id}" first. If there is none, run again with --retry-unknown.`)
   }
+  const record = (r: ConnResult) => {
+    merged.set(r.pipedream_account_id, r)
+    write('connections-result.json', [...merged.values()])
+  }
   const fresh = await applyConnections(classified, deps, {
     skip,
-    onPending: r => {
-      merged.set(r.pipedream_account_id, r)
-      write('connections-result.json', [...merged.values()])
-    },
-    onResult: r => {
-      merged.set(r.pipedream_account_id, r)
-      write('connections-result.json', [...merged.values()])
-    },
+    onPending: record,
+    onResult: record,
   })
   const results = [...merged.values()]
   write('connections-result.json', results)
-  if (args.json) log(JSON.stringify({ ok: results.every(r => r.ok), results }, null, 2))
+  const needsRepair = (r: ConnResult) => r.ok && r.status === 'post_install_error'
+  if (args.json) stdout(json({ ok: results.every(r => r.ok && !needsRepair(r)), results }).trimEnd())
   else {
     for (const r of fresh)
-      log(r.ok ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id})${r.credential_tested === false ? ', credentials not tested by Elaichi' : ''}.` : `Failed ${r.pipedream_app} (${r.pipedream_account_id}): ${r.error_code ?? ''}${r.field ? ` (field ${r.field})` : ''} ${r.error ?? ''} ${errorHelp(r.error_code)}`.replace(/\s+/g, ' ').trim())
+      log(needsRepair(r) ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id}), but it needs repair. ${errorHelp('post_install_error')}` : r.ok ? `Created connection ${r.connection_id ?? '(no id returned)'} for ${r.pipedream_app} (${r.pipedream_account_id})${r.credential_tested === false ? ', credentials not tested by Elaichi' : ''}.` : `Failed ${r.pipedream_app} (${r.pipedream_account_id}): ${r.error_code ?? ''}${r.field ? ` (field ${r.field})` : ''} ${r.error ?? ''} ${errorHelp(r.error_code)}`.replace(/\s+/g, ' ').trim())
     log(`Result: ${resultFile}`)
   }
-  return results.some(r => !r.ok) ? 2 : 0
+  return results.some(r => !r.ok || needsRepair(r)) ? 2 : 0
 }

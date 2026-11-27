@@ -33,6 +33,8 @@ export interface PdAccount {
   authorized_scopes?: string[] | null
   dead?: boolean | null
   healthy?: boolean | null
+  /** Set by fetchPipedreamAccounts when the per-account GET failed (status and path only). */
+  fetch_error?: string
 }
 
 /**
@@ -43,9 +45,10 @@ export interface PdAccount {
  * org_oauth_app_unknown — an OAuth token, but the token may not read the organization's OAuth app (needs connector:manage).
  *                         --apply still sends it; Elaichi answers org_oauth_app_required if the app is missing.
  * no_connector         — no Elaichi connector found for the app. Add a --map entry if it has another slug.
+ * restricted           — the organization's rules block this connector (GET /connector/:slug says `restricted: true`). Not sent.
  */
-export type ConnStatus = 'importable' | 'reconnect' | 'needs_mapping' | 'org_oauth_app_needed' | 'org_oauth_app_unknown' | 'no_connector'
-export const CONN_STATUSES: ConnStatus[] = ['importable', 'org_oauth_app_unknown', 'org_oauth_app_needed', 'needs_mapping', 'no_connector', 'reconnect']
+export type ConnStatus = 'importable' | 'reconnect' | 'needs_mapping' | 'org_oauth_app_needed' | 'org_oauth_app_unknown' | 'no_connector' | 'restricted'
+export const CONN_STATUSES: ConnStatus[] = ['importable', 'org_oauth_app_unknown', 'org_oauth_app_needed', 'needs_mapping', 'no_connector', 'restricted', 'reconnect']
 /** Statuses --apply sends. */
 export const SENDABLE: ConnStatus[] = ['importable', 'org_oauth_app_unknown']
 
@@ -88,7 +91,7 @@ export interface ConnResult {
    * Elaichi's error code: org_oauth_app_required, credential_test_failed, invalid_credentials, …
    * Or this tool's own: `skipped` (not sent), `pending` (sent, no answer recorded yet) and `unknown_outcome`
    * (no answer, or a 5xx: the connection may exist). A re-run does not send `pending` or `unknown_outcome`
-   * again without --retry-unknown.
+   * again without --retry-unknown. `post_install_error` goes with `ok: true`: the connection exists but needs repair.
    */
   error_code?: string
   /** The field Elaichi named, for invalid_credentials. */
@@ -108,16 +111,28 @@ interface AuthField {
 
 interface Connector {
   slug: string
+  restricted?: boolean
   auth_formats: string[]
   auth_fields?: Record<string, AuthField[]>
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+const brief = (r: ApiResponse) => `${r.status} ${r.code ?? ''} ${r.message ?? ''}`.replace(/\s+/g, ' ').trim()
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+
+/** Drops a repeated pipedream_account_id, so one account is never sent twice in a run. Accounts without an id stay. */
+export function dedupeAccounts(accounts: PdAccount[]): PdAccount[] {
+  const seen = new Set<string>()
+  return accounts.filter(a => !a.id || (!seen.has(a.id) && !!seen.add(a.id)))
+}
 
 /** Reads a saved list-accounts answer: one `{ data: [...] }`, an array of such pages, an array of accounts, or `{ data: {...} }`. */
 export function accountsFromJson(json: unknown): PdAccount[] {
+  return dedupeAccounts(readAccounts(json))
+}
+
+function readAccounts(json: unknown): PdAccount[] {
   const pageData = (p: unknown): PdAccount[] => {
     if (!isRecord(p)) return []
     if (Array.isArray(p.data)) return p.data.filter(isRecord) as PdAccount[]
@@ -145,6 +160,7 @@ export function secretsOf(accounts: PdAccount[]): string[] {
   const out = new Set<string>()
   for (const a of accounts) {
     if (!isRecord(a.credentials)) continue
+    // ponytail: a value under 4 characters is not scrubbed (it would blank ordinary words); a real secret is longer.
     for (const v of Object.values(a.credentials)) if ((typeof v === 'string' || typeof v === 'number') && String(v).length >= 4) out.add(String(v))
   }
   return [...out]
@@ -160,6 +176,13 @@ export function scrubber(secrets: string[]): (s: string) => string {
   }
 }
 
+/** Scrubs every string value (and key) inside an object, so JSON.stringify of the result is valid and no `"ok": false` or id is damaged. */
+export function scrubDeep(scrub: (s: string) => string): (v: unknown) => unknown {
+  const walk = (v: unknown): unknown =>
+    typeof v === 'string' ? scrub(v) : Array.isArray(v) ? v.map(walk) : isRecord(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [scrub(k), walk(x)])) : v
+  return walk
+}
+
 export function appSlugOf(a: PdAccount): string {
   return a.app?.name_slug || (a.app?.name ? slugify(a.app.name) : '') || 'unknown_app'
 }
@@ -168,7 +191,7 @@ export function appSlugOf(a: PdAccount): string {
 const CATALOG_SLUGS = new Map<string, string>()
 for (const m of TOOL_MAP) for (const k of m.pipedreamKeys) CATALOG_SLUGS.set(appOf(k), m.slug)
 
-/** Connector slugs to try for a Pipedream app, best first. */
+/** Connector slugs to try for a Pipedream app, best first. ponytail: a name-guessing heuristic, not a lookup; --map is the fix for a miss. */
 export function candidateSlugs(app: string, map: ConnMap): string[] {
   const o = map[app]
   const forced = typeof o === 'string' ? o : o?.connector
@@ -184,7 +207,7 @@ function asConnector(json: unknown, slug: string): Connector | null {
   const fields: Record<string, AuthField[]> | undefined = isRecord(c.auth_fields)
     ? Object.fromEntries(Object.entries(c.auth_fields).map(([m, list]) => [m, Array.isArray(list) ? (list.filter(f => isRecord(f) && typeof f.name === 'string') as unknown as AuthField[]) : []]))
     : undefined
-  return { slug: typeof c.slug === 'string' ? c.slug : slug, auth_formats: formats, ...(fields ? { auth_fields: fields } : {}) }
+  return { slug: typeof c.slug === 'string' ? c.slug : slug, ...(c.restricted === true ? { restricted: true } : {}), auth_formats: formats, ...(fields ? { auth_fields: fields } : {}) }
 }
 
 export class ElaichiError extends Error {}
@@ -193,11 +216,15 @@ interface Deps extends ApiOpts {
   sleep?: (ms: number) => Promise<void>
 }
 
-/** A request that waits once on 429 (Retry-After, at most 60 s), and stops the run on 401 or 403. */
+const sleepMs = (ms: number) => new Promise<void>(res => setTimeout(res, ms))
+/** ponytail: one retry on 429, waiting Retry-After capped at 60 s (5 s when absent). A second 429 is an ordinary failure; add backoff if that bites. */
+const retryWaitMs = (retryAfter?: number) => Math.min(60, retryAfter ?? 5) * 1000
+
+/** A request that waits once on 429, and stops the run on 401 or 403. */
 async function call(method: string, path: string, body: unknown, deps: Deps, fatal = true): Promise<ApiResponse> {
   let r = await request(method, path, body, deps)
   if (r.status === 429) {
-    await (deps.sleep ?? (ms => new Promise(res => setTimeout(res, ms))))(Math.min(60, r.retryAfter ?? 5) * 1000)
+    await (deps.sleep ?? sleepMs)(retryWaitMs(r.retryAfter))
     r = await request(method, path, body, deps)
   }
   if (fatal && (r.status === 401 || r.status === 403)) throw new ElaichiError(`Elaichi answered ${r.status} ${r.code ?? ''} on ${method} ${path.split('?')[0]}: ${r.message ?? 'check ELAICHI_API_TOKEN'}`.replace(/\s+/g, ' '))
@@ -211,7 +238,7 @@ async function findConnector(app: string, map: ConnMap, deps: Deps, cache: Map<s
   for (const slug of candidateSlugs(app, map)) {
     const r = await call('GET', `/connector/${encodeURIComponent(slug)}`, undefined, deps)
     if (r.status === 404) continue
-    if (!r.ok) throw new ElaichiError(`Elaichi answered ${r.status} ${r.code ?? ''} on GET /connector/${slug}`.replace(/\s+/g, ' '))
+    if (!r.ok) throw new ElaichiError(`Elaichi answered ${brief({ ...r, message: undefined })} on GET /connector/${slug}`)
     found = asConnector(r.json, slug)
     if (found) break
   }
@@ -224,19 +251,22 @@ async function findConnector(app: string, map: ConnMap, deps: Deps, cache: Map<s
  * { oauth_app_mode: "platform_default" | "byoa", client_id, … }. `set` is null when the token may not look
  * (403: needs connector:manage) or the answer is unexpected: then nothing is guessed.
  */
-async function orgOAuthApp(slug: string, deps: Deps, cache: Map<string, { set: boolean | null; clientId?: string }>): Promise<{ set: boolean | null; clientId?: string }> {
+type OAuthApp = { set: boolean | null; clientId?: string; notFound?: boolean }
+
+async function orgOAuthApp(slug: string, deps: Deps, cache: Map<string, OAuthApp>): Promise<OAuthApp> {
   const hit = cache.get(slug)
   if (hit) return hit
   const r = await call('GET', `/connector/${encodeURIComponent(slug)}/oauth-app`, undefined, deps, false)
   const j = isRecord(r.json) ? r.json : {}
-  const out: { set: boolean | null; clientId?: string } =
-    r.ok && j.oauth_app_mode === 'byoa' ? { set: true, ...(typeof j.client_id === 'string' ? { clientId: j.client_id } : {}) } : r.ok && j.oauth_app_mode === 'platform_default' ? { set: false } : { set: null }
+  const out: OAuthApp =
+    r.ok && j.oauth_app_mode === 'byoa' ? { set: true, ...(typeof j.client_id === 'string' ? { clientId: j.client_id } : {}) } : r.ok && j.oauth_app_mode === 'platform_default' ? { set: false } : r.status === 404 ? { set: null, notFound: true } : { set: null }
   cache.set(slug, out)
   return out
 }
 
 /** Pipedream credential key → Elaichi oauth2 field. */
-const OAUTH_RENAME: Record<string, string> = { oauth_access_token: 'access_token', oauth_refresh_token: 'refresh_token' }
+// token_type and id_token are sent only when the connector's oauth2 auth_fields list them (fill reads the connector's list).
+const OAUTH_RENAME: Record<string, string> = { oauth_access_token: 'access_token', oauth_refresh_token: 'refresh_token', oauth_token_type: 'token_type', oauth_id_token: 'id_token' }
 
 /** Fills a method's fields from the candidate values. Returns the values and any required field left empty. */
 function fill(fields: AuthField[], candidates: Record<string, string>, explicit: Record<string, string> | undefined): { values: Record<string, string>; missing: string[] } {
@@ -258,7 +288,7 @@ export interface Classified {
   send?: { connector_slug: string; name?: string; credentials: { authentication_method: string; values: Record<string, string> } }
 }
 
-export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, caches: { connectors: Map<string, Connector | null>; oauth: Map<string, { set: boolean | null; clientId?: string }> }): Promise<Classified> {
+export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, caches: { connectors: Map<string, Connector | null>; oauth: Map<string, OAuthApp> }): Promise<Classified> {
   const app = appSlugOf(a)
   const item: ConnPlanItem = { pipedream_account_id: a.id ?? '(no id)', ...(a.name ? { pipedream_account_name: a.name } : {}), pipedream_app: app, status: 'reconnect', reasons: [] }
   const creds = credentialsOf(a)
@@ -269,6 +299,10 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
   }
   if (a.dead) {
     item.reasons.push('Pipedream marks this account dead. Connect it again in Elaichi.')
+    return { item }
+  }
+  if (a.fetch_error) {
+    item.reasons.push(`Fetching this account from Pipedream failed (${a.fetch_error}). Run again, or connect it again in Elaichi.`)
     return { item }
   }
   if (!creds) {
@@ -283,6 +317,11 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
     return { item }
   }
   item.connector_slug = connector.slug
+  if (connector.restricted) {
+    item.status = 'restricted'
+    item.reasons.push(`Your organization's rules block the ${connector.slug} connector. Ask an admin for access, then run this again. Other accounts are not affected.`)
+    return { item }
+  }
   if (connector.auth_fields) item.elaichi_fields = Object.fromEntries(Object.entries(connector.auth_fields).map(([m, fs]) => [m, fs.map(f => f.name)]))
   const override = map[app]
   const explicit = typeof override === 'object' ? override.fields : undefined
@@ -298,7 +337,11 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
     }
     const candidates: Record<string, string> = {}
     // Only fields the connector declares are sent, so oauth_client_id and oauth_uid stay behind.
-    for (const [k, v] of Object.entries(creds)) candidates[OAUTH_RENAME[k] ?? k] = v
+    // Both spellings are candidates, so a --map "fields" entry can use Pipedream's own key name (oauth_access_token) or the renamed one.
+    for (const [k, v] of Object.entries(creds)) {
+      candidates[k] = v
+      if (OAUTH_RENAME[k]) candidates[OAUTH_RENAME[k]] = v
+    }
     if (a.expires_at && !candidates.expires_at) candidates.expires_at = a.expires_at
     if (!candidates.scope && Array.isArray(a.authorized_scopes) && a.authorized_scopes.length > 0) candidates.scope = a.authorized_scopes.join(' ')
     const fields = connector.auth_fields?.oauth2
@@ -319,7 +362,8 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
     values = r.values
   } else {
     const wanted = typeof override === 'object' ? override.authentication_method : undefined
-    const methods = (wanted ? [wanted] : connector.auth_formats).filter(m => m !== 'oauth2')
+    // A --map entry may name oauth2 for a key-based account whose fields map to access_token / refresh_token.
+    const methods = wanted ? [wanted] : connector.auth_formats.filter(m => m !== 'oauth2')
     for (const m of methods) {
       const fields = connector.auth_fields?.[m]
       if (!fields || fields.length === 0) continue
@@ -359,7 +403,11 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
     }
     if (own.set === null) {
       item.status = 'org_oauth_app_unknown'
-      item.reasons.push(`Could not read the organization's OAuth app for ${connector.slug} (needs the connector:manage permission). --apply sends it; Elaichi answers org_oauth_app_required if the app is missing or a different client.`)
+      item.reasons.push(
+        own.notFound
+          ? `Elaichi has no organization OAuth app to read for ${connector.slug} (the connector may be custom or take no own OAuth app). --apply sends it; Elaichi answers org_oauth_app_required if one is needed.`
+          : `Could not read the organization's OAuth app for ${connector.slug} (needs the connector:manage permission). --apply sends it; Elaichi answers org_oauth_app_required if the app is missing or a different client.`,
+      )
       return { item, send }
     }
   }
@@ -369,7 +417,7 @@ export async function classifyAccount(a: PdAccount, map: ConnMap, deps: Deps, ca
 }
 
 export async function planConnections(accounts: PdAccount[], map: ConnMap, deps: Deps, source: string): Promise<{ plan: ConnPlan; classified: Classified[] }> {
-  const caches = { connectors: new Map<string, Connector | null>(), oauth: new Map<string, { set: boolean | null; clientId?: string }>() }
+  const caches = { connectors: new Map<string, Connector | null>(), oauth: new Map<string, OAuthApp>() }
   const classified: Classified[] = []
   for (const a of accounts) classified.push(await classifyAccount(a, map, deps, caches))
   const summary = Object.fromEntries(CONN_STATUSES.map(s => [s, 0])) as Record<ConnStatus, number>
@@ -381,7 +429,8 @@ export async function planConnections(accounts: PdAccount[], map: ConnMap, deps:
 export const UNKNOWN_OUTCOME = ['pending', 'unknown_outcome']
 
 /**
- * Creates each importable connection with POST /connection, one at a time. Stops at 401, 403, 428 or 503.
+ * Creates each importable connection with POST /connection, one at a time. Stops at 401, 428, 503, or a 403 that
+ * applies to the whole token (see stopsRun). A per-connector 403 `forbidden` fails only that account.
  * `skip` holds Pipedream account ids not to send (created, or unknown outcome). `onPending` runs just before each
  * POST and `onResult` just after, so a result file always shows an account in flight as `pending`.
  */
@@ -396,8 +445,10 @@ export async function applyConnections(
     opts.onResult?.(r)
   }
   let stopped: string | undefined
+  const sent = new Set<string>()
   for (const c of classified) {
-    if (!SENDABLE.includes(c.item.status) || !c.send || opts.skip?.has(c.item.pipedream_account_id)) continue
+    if (!SENDABLE.includes(c.item.status) || !c.send || opts.skip?.has(c.item.pipedream_account_id) || sent.has(c.item.pipedream_account_id)) continue
+    sent.add(c.item.pipedream_account_id)
     const base = { pipedream_account_id: c.item.pipedream_account_id, pipedream_app: c.item.pipedream_app, connector_slug: c.send.connector_slug, ...(c.send.name ? { connection_name: c.send.name } : {}) }
     if (stopped) {
       push({ ...base, ok: false, error_code: 'skipped', error: `Not sent: ${stopped}` })
@@ -414,33 +465,43 @@ export async function applyConnections(
     if (r.ok) {
       const j = r.json
       const conn = isRecord(j) && isRecord(j.connection) ? j.connection : j
+      const repair = isRecord(conn) && conn.status === 'post_install_error'
       push({
         ...base,
         ok: true,
+        // Created, but its post-install step failed: it needs POST /connection/:id/run-post-install.
+        ...(repair ? { error_code: 'post_install_error', error: 'Created, but its post-install step failed.' } : {}),
         ...(isRecord(conn) && typeof conn.id === 'string' ? { connection_id: conn.id } : {}),
         ...(isRecord(conn) && typeof conn.status === 'string' ? { status: conn.status } : {}),
         ...(isRecord(conn) && typeof conn.credential_tested === 'boolean' ? { credential_tested: conn.credential_tested } : {}),
       })
       continue
     }
-    if (r.status >= 500 && r.status !== 503) {
-      push({ ...base, ok: false, error_code: 'unknown_outcome', error: `${r.status} ${r.code ?? ''} ${r.message ?? ''}`.replace(/\s+/g, ' ').trim() })
+    // A coded 500 internal_error is Elaichi's own answer: it has already cleaned up, so it is a plain failure.
+    // provider_unavailable (502/503): the app did not answer, Elaichi cleaned up first. A plain failure a re-run may resend.
+    if (r.status >= 500 && r.status !== 503 && r.code !== 'provider_unavailable' && !(r.status === 500 && r.code === 'internal_error')) {
+      push({ ...base, ok: false, error_code: 'unknown_outcome', error: brief(r) })
       continue
     }
     const d = isRecord(r.details) ? r.details : {}
     const field = typeof d.field === 'string' ? d.field : isRecord(r.json) && typeof r.json.field === 'string' ? r.json.field : undefined
     // Only the status, code and Elaichi's own message: never the raw body, which could echo what was sent.
     push({ ...base, ok: false, error_code: r.code ?? `http_${r.status}`, ...(field ? { field } : {}), error: `${r.status} ${r.message ?? ''}`.trim() })
-    if (STOP_STATUSES.includes(r.status)) stopped = `Elaichi answered ${r.status} ${r.code ?? ''} on an earlier account. ${errorHelp(r.code ?? `http_${r.status}`)}`.replace(/\s+/g, ' ').trim()
+    if (stopsRun(r)) stopped = `Elaichi answered ${r.status} ${r.code ?? ''} on an earlier account. ${errorHelp(r.code ?? `http_${r.status}`)}`.replace(/\s+/g, ' ').trim()
   }
   return results
 }
 
 /**
- * Answers that make every later account fail the same way, so the run stops: 401 (token), 403 (permission),
- * 428 (step-up, which an API token should never get) and 503 (connection_import_unavailable: Elaichi's import is not deployed).
+ * Answers that make every later account fail the same way, so the run stops: 401 (token), 428 (step-up, which an
+ * API token should never get), 503 (connection_import_unavailable, platform_connections_stopped, …) and a 403 that
+ * is about the whole token: `permission_required`, or the staff refusal (code `forbidden`, message names staff).
+ * A 403 `forbidden` about one connector ("restricted for your account") is that account's failure only.
+ * ponytail: the staff refusal is told apart by its message text, since Elaichi gives it the generic `forbidden` code;
+ * ask Elaichi for a distinct code and match on it.
  */
-const STOP_STATUSES = [401, 403, 428, 503]
+const STOP_STATUSES = [401, 428, 503]
+const stopsRun = (r: ApiResponse) => (STOP_STATUSES.includes(r.status) && r.code !== 'provider_unavailable') || (r.status === 403 && (r.code === 'permission_required' || /staff/i.test(r.message ?? '')))
 
 /** What to do next for an apply error code. */
 export function errorHelp(code: string | undefined): string {
@@ -454,6 +515,7 @@ export function errorHelp(code: string | undefined): string {
     case 'unknown_outcome':
     case 'pending':
       return 'No clear answer: the connection may exist. Check Elaichi for a connection with this name before you send it again with --retry-unknown.'
+    case 'validation_error':
     case 'invalid_credentials':
     case 'missing_required_field':
     case 'invalid_field':
@@ -465,6 +527,16 @@ export function errorHelp(code: string | undefined): string {
       return 'This connector is not set up in your Elaichi organization. Add it in Elaichi, or connect the account again.'
     case 'connection_import_unavailable':
       return 'Elaichi cannot import connections yet. Nothing more was sent. Run --apply again later.'
+    case 'platform_connections_stopped':
+      return 'Elaichi has paused connection changes for the whole platform. Nothing more was sent. Run --apply again later.'
+    case 'http_503':
+      return 'Elaichi is unavailable. Nothing more was sent. Run --apply again later.'
+    case 'provider_unavailable':
+      return 'The app\'s server did not answer, and nothing was kept. Run --apply again later.'
+    case 'internal_error':
+      return 'Elaichi had an error and cleaned up, so no connection was kept. Run --apply again.'
+    case 'post_install_error':
+      return 'The connection exists but its post-install step failed. Repair it: POST /connection/<id>/run-post-install (or repair it in Elaichi), then check its status.'
     case 'step_up_required':
       return 'Elaichi asked to re-verify, which should not happen with an API token. Please report it to Elaichi support.'
     case 'unauthorized':
@@ -473,7 +545,7 @@ export function errorHelp(code: string | undefined): string {
     case 'permission_required':
     case 'forbidden':
     case 'http_403':
-      return 'The token\'s owner lacks a permission. Read the message above.'
+      return 'The token\'s owner lacks a permission, or the connector is restricted for them. Read the message above.'
     case 'rate_limited':
     case 'http_429':
       return 'Rate limited. Wait, then run --apply again.'
@@ -500,7 +572,7 @@ export const PIPEDREAM_ENV_HELP =
  * then GET /v1/accounts/{id}?include_credentials=true for any account that came back without credentials.
  * Error messages carry the status and path only, never a body.
  */
-export async function fetchPipedreamAccounts(env: PdEnv, fetchFn: typeof fetch = fetch): Promise<PdAccount[]> {
+export async function fetchPipedreamAccounts(env: PdEnv, fetchFn: typeof fetch = fetch, opts: { sleep?: (ms: number) => Promise<void>; warn?: (s: string) => void } = {}): Promise<PdAccount[]> {
   const base = (env.PIPEDREAM_API_URL ?? 'https://api.pipedream.com/v1').replace(/\/+$/, '')
   let token: string
   const orgId = env.PIPEDREAM_ORG_ID
@@ -520,7 +592,13 @@ export async function fetchPipedreamAccounts(env: PdEnv, fetchFn: typeof fetch =
 
   const get = async (path: string, params: Record<string, string>) => {
     const q = new URLSearchParams({ ...params, include_credentials: 'true', ...(orgId ? { org_id: orgId } : {}) })
-    const res = await fetchFn(`${base}${path}?${q}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } })
+    const url = `${base}${path}?${q}`
+    const init = { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+    let res = await fetchFn(url, init)
+    if (res.status === 429) {
+      await (opts.sleep ?? sleepMs)(retryWaitMs(Number(res.headers.get('Retry-After')) || undefined))
+      res = await fetchFn(url, init)
+    }
     if (!res.ok) throw new Error(`Pipedream answered ${res.status} on GET ${path}.`)
     // This body carries credentials: a parse error message could quote it, so only the path is named.
     try {
@@ -533,20 +611,31 @@ export async function fetchPipedreamAccounts(env: PdEnv, fetchFn: typeof fetch =
   const accounts: PdAccount[] = []
   const seen = new Set<string>()
   let after: string | undefined
+  let finished = false
+  // ponytail: at most 200 pages of 100 (20,000 accounts); a bigger workspace gets a warning, then the first 20,000. Raise it or stream if that bites.
   for (let page = 0; page < 200; page++) {
     const j = await get('/accounts', { limit: '100', ...(after ? { after } : {}) })
     const data = Array.isArray(j.data) ? (j.data.filter(isRecord) as PdAccount[]) : []
     accounts.push(...data)
     const next = j.page_info?.end_cursor ?? undefined
-    if (data.length === 0 || !next || seen.has(next)) break
+    if (data.length === 0 || !next || seen.has(next)) {
+      finished = true
+      break
+    }
     seen.add(next)
     after = next
   }
+  if (!finished) opts.warn?.(`Warning: stopped after 200 pages of Pipedream accounts (${accounts.length}). Accounts beyond that are not in this run.`)
   for (let i = 0; i < accounts.length; i++) {
     const a = accounts[i] as PdAccount
     if (a.id && !credentialsOf(a) && !a.dead) {
-      const j = await get(`/accounts/${encodeURIComponent(a.id)}`, {})
-      if (isRecord(j.data)) accounts[i] = { ...a, ...(j.data as PdAccount) }
+      try {
+        const j = await get(`/accounts/${encodeURIComponent(a.id)}`, {})
+        if (isRecord(j.data)) accounts[i] = { ...a, ...(j.data as PdAccount) }
+      } catch (e) {
+        // This account only: keep its id, say why, and go on with the rest.
+        accounts[i] = { ...a, fetch_error: (e as Error).message }
+      }
     }
   }
   return accounts

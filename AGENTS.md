@@ -24,4 +24,4 @@ Hard rules: never publish or enable a workflow. Never print, log or write a toke
 - `src/catalog.ts` maps Pipedream actions to Elaichi tools. Add an `args` mapper only when both sides' field names were checked, and list the props it reads in `argProps`.
 - What is and is not confirmed about the export format is in [FORMAT.md](FORMAT.md). Update it when a real export settles a point.
 - `--push` and `push` only call `POST /automation`. Never add a call to publish or enable.
-- `connections` only reads Pipedream and calls `GET /connector/…` and `POST /connection`. No credential value may reach a log line, a file or an error message. `test/connections.test.ts` checks that with a sentinel secret: keep it passing, and extend it for every new output.
+- `connections` only reads Pipedream (`GET /v1/accounts…`, and `POST /oauth/token` for an OAuth client) and calls `GET /connector/{slug}`, `GET /connector/{slug}/oauth-app` and `POST /connection`. No credential value may reach a log line, a file or an error message. `test/connections.test.ts` checks that with a sentinel secret: keep it passing, and extend it for every new output.
