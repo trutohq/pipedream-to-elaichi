@@ -21,7 +21,7 @@ function workflowSection(w: WorkflowReport): string {
   }
   lines.push('')
 
-  if (w.reconnect.length > 0) lines.push(`Connect again in Elaichi: ${w.reconnect.join(', ')}. Pipedream exports no credentials.`, '')
+  if (w.reconnect.length > 0) lines.push(`Apps this workflow uses: ${w.reconnect.join(', ')}. The export holds no credentials. Run \`pipedream-to-elaichi connections\` to move the accounts Pipedream's API returns credentials for, then connect the rest again in Elaichi.`, '')
   if (w.secrets.length > 0) lines.push(`Re-enter these redacted secrets: ${w.secrets.join('; ')}.`, '')
   for (const n of w.notes) lines.push(`- ${n}`)
   if (w.notes.length > 0) lines.push('')
@@ -41,7 +41,7 @@ export function renderMarkdown(r: ProjectReport): string {
   out.push(`Input: \`${r.input}\`. Generated ${r.generated_at}.`, '')
   out.push(`${r.workflows.length} workflow${r.workflows.length === 1 ? '' : 's'} converted to drafts. Triggers and steps: mapped ${total.mapped}, needs work ${total.needs_work}, no match ${total.no_match}.`, '')
   out.push('Every draft with something to fix starts with a step named "TODO: review this import, then delete this step". It fails each run on purpose. Nothing here is published or turned on.', '')
-  out.push('Next: reconnect each app in Elaichi, create a toolbox for the tools the drafts call, fix each TODO, validate, test-run, publish, then turn the workflow on.', '')
+  out.push('Next: move connected accounts with `pipedream-to-elaichi connections` and connect the rest again in Elaichi, create a toolbox for the tools the drafts call, fix each TODO, validate, test-run, publish, then turn the workflow on.', '')
 
   if (r.workflows.length > 0) {
     out.push('| Workflow | Draft | Mapped | Needs work | No match |', '|---|---|---|---|---|')

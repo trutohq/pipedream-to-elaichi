@@ -2,3 +2,7 @@ node_modules/
 out/
 *.log
 .env
+elaichi-connections/
+accounts*.json
+*accounts*.json
+!test/fixtures/connections/accounts.json

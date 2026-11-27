@@ -103,7 +103,7 @@ export interface WorkflowReport {
   steps: StepReport[]
   /** Workflow-wide Elaichi limits it runs into (too many steps or code steps). */
   limits: LimitId[]
-  /** Apps to connect again in Elaichi (Pipedream exports no credentials). */
+  /** Apps to connect in Elaichi. The export holds no credentials: the `connections` command moves the accounts it can. */
   reconnect: string[]
   /** Secret props Pipedream redacted: re-enter them. */
   secrets: string[]

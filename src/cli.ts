@@ -4,6 +4,7 @@ import { basename, join, resolve } from 'node:path'
 import { checkDefinition, findTodos } from './check.ts'
 import { loadInput } from './parse.ts'
 import { convertProject } from './project.ts'
+import { runConnections } from './connections-cli.ts'
 import { pushDrafts, validateDrafts } from './push.ts'
 import type { DraftBody } from './types.ts'
 import { renderMarkdown } from './report.ts'
@@ -15,6 +16,7 @@ Usage:
   pipedream-to-elaichi check <drafts folder | draft.elaichi.json> [--json]
   pipedream-to-elaichi validate <drafts folder | draft.elaichi.json> [--json] [--api-url <url>]
   pipedream-to-elaichi push <drafts folder | draft.elaichi.json> [--api-url <url>]
+  pipedream-to-elaichi connections [--accounts-file <path>] [--map <file>] [--apply] [--out <dir>] [--json]
 
 Commands:
   (none)     Convert an export: write drafts, report.md and report.json.
@@ -24,6 +26,13 @@ Commands:
              Needs ELAICHI_API_TOKEN.
   push       Create each draft in Elaichi (POST /automation). Never publishes or turns anything on.
              Needs ELAICHI_API_TOKEN.
+  connections
+             Move Pipedream connected accounts to Elaichi connections where Pipedream returns their
+             credentials. Dry run by default: prints a table and writes connections-plan.json (no secret
+             values). --apply creates each importable connection (POST /connection) and writes
+             connections-result.json. Needs ELAICHI_API_TOKEN, and either --accounts-file or Pipedream
+             credentials in the environment: PIPEDREAM_CLIENT_ID + PIPEDREAM_CLIENT_SECRET, or
+             PIPEDREAM_API_KEY + PIPEDREAM_ORG_ID.
 
 Options:
   --out <dir>              Where to write drafts and the report (default: ./elaichi-drafts)
@@ -31,8 +40,16 @@ Options:
   --push                   Also create each draft in Elaichi with POST /automation.
                            Needs ELAICHI_API_TOKEN. Drafts are never published or turned on.
   --api-url <url>          Elaichi API base URL (default: https://api.elaichi.ai)
-  --json                   check / validate: print the result as JSON
-  --force                  Overwrite drafts already in --out (this throws away any edits made to them)
+  --json                   check / validate / connections: print the result as JSON
+  --force                  Overwrite drafts already in --out (this throws away any edits made to them).
+                           connections --apply: move an earlier connections-result.json to a timestamped backup and
+                           start over (this can create connections twice)
+  --accounts-file <path>   connections: a saved Pipedream list-accounts answer. With credentials it holds live secrets.
+  --map <file>             connections: JSON overrides, { "<pipedream app>": "<elaichi slug>" } or
+                           { "<pipedream app>": { "connector", "authentication_method", "fields": { "<pipedream key>": "<elaichi field>" } } }
+  --apply                  connections: create the importable connections in Elaichi (default is a dry run)
+  --retry-unknown          connections --apply: send again the accounts an earlier run got no clear answer for.
+                           Check Elaichi for those connections first.
   -h, --help               Show this help
 
 Writes one <workflow>.elaichi.json per workflow ({ name, description, definition }, the body of
@@ -40,7 +57,13 @@ POST /automation), report.md, report.json, and migration-plan.json: every open i
 the original code and the Elaichi limit it hits, for an AI coding agent to work through.`
 
 export interface CliArgs {
-  command?: 'check' | 'validate' | 'push'
+  command?: 'check' | 'validate' | 'push' | 'connections'
+  accountsFile?: string
+  map?: string
+  apply: boolean
+  retryUnknown: boolean
+  /** True when --out was given. */
+  outSet: boolean
   json: boolean
   force: boolean
   input?: string
@@ -52,8 +75,8 @@ export interface CliArgs {
 }
 
 export function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { out: 'elaichi-drafts', toolboxes: {}, push: false, help: false, json: false, force: false }
-  if (argv[0] === 'check' || argv[0] === 'validate' || argv[0] === 'push') {
+  const args: CliArgs = { out: 'elaichi-drafts', toolboxes: {}, push: false, help: false, json: false, force: false, apply: false, retryUnknown: false, outSet: false }
+  if (argv[0] === 'check' || argv[0] === 'validate' || argv[0] === 'push' || argv[0] === 'connections') {
     args.command = argv[0]
     argv = argv.slice(1)
   }
@@ -65,7 +88,13 @@ export function parseArgs(argv: string[]): CliArgs {
       return v
     }
     if (a === '-h' || a === '--help') args.help = true
-    else if (a === '--out') args.out = next()
+    else if (a === '--out') {
+      args.out = next()
+      args.outSet = true
+    } else if (a === '--accounts-file') args.accountsFile = next()
+    else if (a === '--map') args.map = next()
+    else if (a === '--apply') args.apply = true
+    else if (a === '--retry-unknown') args.retryUnknown = true
     else if (a === '--push') args.push = true
     else if (a === '--json') args.json = true
     else if (a === '--force') args.force = true
@@ -82,7 +111,7 @@ export function parseArgs(argv: string[]): CliArgs {
   return args
 }
 
-export async function main(argv: string[], env: Record<string, string | undefined> = process.env, log = console.log): Promise<number> {
+export async function main(argv: string[], env: Record<string, string | undefined> = process.env, log = console.log, fetchFn: typeof fetch = fetch, errLog: (s: string) => void = console.error): Promise<number> {
   let args: CliArgs
   try {
     args = parseArgs(argv)
@@ -90,12 +119,19 @@ export async function main(argv: string[], env: Record<string, string | undefine
     log(`Error: ${(e as Error).message}\n\n${HELP}`)
     return 1
   }
+  if (args.command === 'connections' && !args.help) {
+    if (args.input !== undefined) {
+      log(`Error: connections takes no folder or file. Use --accounts-file <path>.\n\n${HELP}`)
+      return 1
+    }
+    return runConnections(args, env, log, fetchFn, errLog)
+  }
   if (args.help || !args.input) {
     log(HELP)
     return args.help ? 0 : 1
   }
   const token = env.ELAICHI_API_TOKEN
-  if (args.command) return runCommand(args.command, args, token, log)
+  if (args.command && args.command !== 'connections') return runCommand(args.command, args, token, log)
   if (args.push && !token) {
     log('Error: --push needs ELAICHI_API_TOKEN (create one in Elaichi under Settings → API tokens).')
     return 1
@@ -134,6 +170,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
   log(`Report: ${join(args.out, 'report.md')}`)
   const open = plan.workflows.reduce((n, w) => n + w.items.length, 0)
   log(`Work list for an AI coding agent: ${join(args.out, 'migration-plan.json')} (${open} item${open === 1 ? '' : 's'})`)
+  if (report.workflows.some(w => w.reconnect.length > 0)) log('Connected accounts: the export holds no credentials. Run `pipedream-to-elaichi connections` to move the accounts Pipedream returns credentials for, and connect the rest again.')
 
   if (args.push && token) {
     const results = await pushDrafts(drafts, { token, apiUrl: args.apiUrl })

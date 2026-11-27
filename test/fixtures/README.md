@@ -9,3 +9,5 @@ Their shape follows what is public as of 24 November 2026:
 - Other open-source converters (`lang`, `uses: { registry, key, version, code }`).
 
 `github-sync-style.json` uses the GitHub Sync spellings. The others use the export spellings. See `FORMAT.md` at the repo root.
+
+`connections/accounts.json` is a hand-built Pipedream list-accounts answer (`GET /v1/accounts?include_credentials=true`, shape from https://pipedream.com/docs/connect/api-reference/list-accounts and https://pipedream.com/docs/rest-api/api-reference/accounts/get-account, checked 26 November 2026). Every credential value starts with `SENTINEL_SECRET` so tests can prove no value is printed or written.

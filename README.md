@@ -87,9 +87,52 @@ ELAICHI_API_TOKEN=elch_... npx -y github:trutohq/pipedream-to-elaichi push ./ela
 
 Then, for each draft in Elaichi:
 
-1. Connect each app again. Pipedream exports no credentials.
+1. Bring each app's account over: [move it](#move-connected-accounts) with `connections`, or connect it again in Elaichi. The export holds no credentials.
 2. Fix each TODO step, then delete the first step, "TODO: review this import, then delete this step". That step fails every run on purpose until you delete it.
 3. Validate the draft, test-run it, publish it, then turn it on.
+
+### Move connected accounts
+
+The export holds no credentials. But Pipedream's API returns them for some accounts, and Elaichi can create a connection from them. Then you do not connect those apps again.
+
+```bash
+# Dry run: reads your accounts, prints a table, writes elaichi-connections/connections-plan.json. Creates nothing.
+PIPEDREAM_CLIENT_ID=… PIPEDREAM_CLIENT_SECRET=… ELAICHI_API_TOKEN=elch_… \
+  npx -y github:trutohq/pipedream-to-elaichi connections
+
+# Create the importable connections, one at a time. Writes elaichi-connections/connections-result.json.
+… npx -y github:trutohq/pipedream-to-elaichi connections --apply
+```
+
+Where the accounts come from:
+
+- Live: `GET https://api.pipedream.com/v1/accounts?include_credentials=true`, every page. Set `PIPEDREAM_CLIENT_ID` and `PIPEDREAM_CLIENT_SECRET` (an OAuth client from your workspace's [API settings](https://pipedream.com/settings/api)). Or set `PIPEDREAM_API_KEY` and `PIPEDREAM_ORG_ID` (your workspace id, `o_…`).
+- A file: `--accounts-file accounts.json`, a saved answer from that call (one `{ "data": [...] }`, an array of those pages, or an array of accounts). A Pipedream Connect `GET /v1/connect/{project_id}/accounts` answer works too. **A file with credentials holds live secrets.** Keep it private, keep it out of git (this repo's `.gitignore` skips `*accounts*.json`), and delete it when you are done.
+
+What each status means:
+
+| Status | Meaning | What to do |
+|---|---|---|
+| importable | Credentials are present and fit an Elaichi auth method. | `--apply` creates the connection. |
+| org OAuth app needed | An OAuth token. Pipedream returns those only for accounts on your own OAuth client, and Elaichi needs that same client. Elaichi still uses its own client, or a different one. | In Elaichi, set that client as the organization's own OAuth app for the connector. Run again. |
+| org OAuth app unknown | An OAuth token, but your token may not read the connector's OAuth app (that needs the `connector:manage` permission). | `--apply` sends it. If the app is missing, Elaichi answers `org_oauth_app_required`. |
+| needs mapping | Credentials are present, but their key names do not match the connector's fields. | Add a `--map` entry. The plan lists both key lists (names only). |
+| no connector | No Elaichi connector matched the app's slug. | Add a `--map` entry if Elaichi has it under another slug. |
+| restricted | Your organization's rules block that connector (`restricted: true` on `GET /connector/{slug}`). | Not sent. Ask an admin for access, then run again. The other accounts still go. |
+| reconnect | Pipedream returned no credentials, the account is dead, or fetching it from Pipedream failed. | Connect it again in Elaichi. |
+
+`--map map.json` overrides the match:
+
+```json
+{
+  "google_sheets": "googlesheets",
+  "acme_crm": { "connector": "acme-crm", "authentication_method": "api_key", "fields": { "token": "api_token" } }
+}
+```
+
+`fields` may use Pipedream's own OAuth key names (`oauth_access_token`, `oauth_refresh_token`) or the renamed ones (`access_token`, `refresh_token`). For `oauth2_client_credentials` and `jwt_bearer`, name the method and map the keys: `{ "acme": { "connector": "acme", "authentication_method": "oauth2_client_credentials", "fields": { "client_id": "client_id", "secret": "client_secret" } } }` (for `jwt_bearer`, map to the field names in the connector's `auth_fields`). `"authentication_method": "oauth2"` also works for a key-based account whose fields map to `access_token` (and `refresh_token`); it needs the organization's own OAuth app. `token_type` and `id_token` are sent only when the connector lists them.
+
+Only the fields the connector lists in `auth_fields` are sent. Key-based apps match by field name. Basic auth goes in as `api_key` with `username` and `password`. OAuth keys map by themselves: `oauth_access_token` → `access_token`, `oauth_refresh_token` → `refresh_token`, the account's `expires_at` and `authorized_scopes` → `expires_at` and `scope`. The tool never prints or writes a credential value: the plan and result hold key names only. `--apply` writes the result after each account: a connection id, or Elaichi's error `code` (and `field`, for a field problem). It stops at once on 401, 428, any 503 (`connection_import_unavailable`: the import is not live yet; `platform_connections_stopped`: paused for the platform), or a 403 about the whole token (`permission_required`, or the staff refusal). A 403 `forbidden` about one connector fails only that account. `provider_unavailable` (the app's server did not answer, nothing kept), `credential_test_incomplete` (the check could not finish, nothing kept) and a coded 500 `internal_error` (Elaichi cleaned up) are plain failures: run again. A repeated Pipedream account id is sent once. A 429 from Pipedream or Elaichi is retried once. A connection created with status `post_install_error` counts as created but needs repair: run `POST /connection/{id}/run-post-install` (the run exits 2). With `--json`, stdout holds only the JSON; tables and notes go to stderr. Run it again in the same `--out` folder after you fix something: it skips the accounts it already created. If a send got no clear answer (a network error or a 5xx), the result says `unknown_outcome`, and a re-run does not send that account again: check Elaichi for a connection with that name first, then add `--retry-unknown`. `--force` moves the earlier result to a timestamped backup and starts over, which can create connections twice. Each created connection records `credential_tested`: whether Elaichi checked the credentials with the app.
 
 ## What maps to what
 

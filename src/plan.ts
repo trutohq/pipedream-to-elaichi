@@ -25,6 +25,8 @@ export interface MigrationPlan {
   input: string
   /** The playbook for working through this plan. */
   instructions: string
+  /** How to bring the apps in each workflow's `reconnect` list over. */
+  connections: string
   limits: Record<string, { limit: string; instead: string }>
   workflows: {
     name: string
@@ -39,7 +41,7 @@ export interface MigrationPlan {
 
 /** Props as the agent should see them: connected accounts shown as such, secrets left redacted. */
 function safeProps(props: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(props).map(([k, v]) => [k, isObj(v) && 'authProvisionId' in v ? '(connected account: reconnect in Elaichi)' : v]))
+  return Object.fromEntries(Object.entries(props).map(([k, v]) => [k, isObj(v) && 'authProvisionId' in v ? '(connected account: move it with the connections command, or connect it again in Elaichi)' : v]))
 }
 
 function original(step: PdStep | undefined, language: string): PlanItem['original'] {
@@ -88,6 +90,7 @@ export function buildPlan(report: ProjectReport, workflows: { wf: PdWorkflow; re
     generated_at: report.generated_at,
     input: report.input,
     instructions: 'https://github.com/trutohq/pipedream-to-elaichi/blob/main/skills/migrate-pipedream-to-elaichi/SKILL.md',
+    connections: 'The export holds no credentials. Run `pipedream-to-elaichi connections` (dry run; ask the person before --apply) to move the accounts Pipedream\'s API returns credentials for. Connect the rest again in Elaichi.',
     limits: Object.fromEntries([...used].sort().map(id => [id, LIMITS[id]])),
     workflows: out,
     not_converted: report.not_converted,
